@@ -1,5 +1,7 @@
 #include "core/opn.h"
 
+#include <cmath>
+
 #include "core/timing.h"
 
 namespace mz {
@@ -12,8 +14,33 @@ constexpr float FM_GAIN = 1.0f / 32768.0f;
 constexpr float SSG_GAIN = 1.0f / (3.0f * 49152.0f);
 } // namespace
 
+void OpnYm2203::Biquad::design_lowpass(double fs, double fc, double q) {
+    const double w0 = 2.0 * M_PI * fc / fs;
+    const double alpha = std::sin(w0) / (2.0 * q);
+    const double cw = std::cos(w0);
+    const double a0 = 1.0 + alpha;
+    b0 = ((1.0 - cw) / 2.0) / a0;
+    b1 = (1.0 - cw) / a0;
+    b2 = b0;
+    a1 = (-2.0 * cw) / a0;
+    a2 = (1.0 - alpha) / a0;
+    clear();
+}
+
+void OpnYm2203::design_filters() {
+    // 4th-order Butterworth (Q pair 0.5412 / 1.3066) just under the output
+    // Nyquist; the real chip's analog path has no folded images, so neither
+    // should we
+    const double fc = std::min(0.45 * out_rate_, 20000.0);
+    lp1_.design_lowpass(chip_rate_, fc, 0.5412);
+    lp2_.design_lowpass(chip_rate_, fc, 1.3066);
+    const double fm_fc = fm_lpf_hz_ > 0 ? (double)fm_lpf_hz_ : fc;
+    fm_lp1_.design_lowpass(chip_rate_, fm_fc, 0.5412);
+    fm_lp2_.design_lowpass(chip_rate_, fm_fc, 1.3066);
+}
+
 OpnYm2203::OpnYm2203() : chip_(*this) {
-    chip_.set_fidelity(ymfm::OPN_FIDELITY_MED); // clock/12 ~= 166.7 kHz
+    chip_.set_fidelity(ymfm::OPN_FIDELITY_MAX); // clock/4 = 500 kHz
     reset();
 }
 
@@ -28,10 +55,12 @@ void OpnYm2203::reset() {
     prev_sample_ = 0.0f;
     ring_.clear();
     ring_read_ = 0;
+    design_filters();
 }
 
 void OpnYm2203::set_output_rate(uint32_t rate) {
     if (rate > 0) out_rate_ = rate;
+    design_filters();
 }
 
 uint8_t OpnYm2203::read_status(uint64_t now) {
@@ -75,9 +104,9 @@ void OpnYm2203::flush_to(uint64_t now) {
     ymfm::ym2203::output_data out;
     while (generated_ < target) {
         chip_.generate(&out);
-        const float fm = (float)out.data[0] * FM_GAIN;
+        const float fm = fm_lp2_.run(fm_lp1_.run((float)out.data[0] * FM_GAIN));
         const float ssg = (float)(out.data[1] + out.data[2] + out.data[3]) * SSG_GAIN;
-        push_chip_sample(fm + ssg);
+        push_chip_sample(lp2_.run(lp1_.run(fm * fm_mix_ + ssg * ssg_mix_)));
         generated_++;
     }
 }

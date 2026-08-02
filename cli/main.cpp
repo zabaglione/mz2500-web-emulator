@@ -128,6 +128,56 @@ int run_selftest() {
     return failures == 0 ? 0 : 1;
 }
 
+// Program the SSG directly and measure output frequencies - detects any
+// scaling mismatch between ymfm's SSG and the MZ-2500 formula
+// (f = 2MHz / (32 * TP), the relation the MZSD driver and EmuZ agree on).
+int run_ssg_test() {
+    for (int tp : {47, 40, 100}) {
+        mz::OpnYm2203 opn;
+        opn.set_output_rate(48000);
+        uint64_t t = 0;
+        auto wr = [&](uint8_t reg, uint8_t val) {
+            opn.write_address(reg, t);
+            t += 100;
+            opn.write_data(val, t);
+            t += 100;
+        };
+        wr(0x07, 0x3E);            // mixer: tone A only
+        wr(0x08, 0x0F);            // channel A volume max
+        wr(0x00, (uint8_t)tp);     // tone period low
+        wr(0x01, (uint8_t)(tp >> 8));
+        if (tp == 47) {
+            // vibrato pattern like the MZSD driver: rewrite the period at
+            // every 125 Hz tick, alternating two neighbouring values
+            for (int tick = 0; t < 6'000'000; tick++) {
+                t += 48'000; // 125 Hz in CPU cycles
+                wr(0x00, (uint8_t)(tick & 1 ? 44 : 47));
+            }
+        }
+        opn.flush_to(6'000'000);   // one emulated second
+        std::vector<float> buf(65536);
+        std::vector<float> all;
+        size_t n;
+        while ((n = opn.read_audio(buf.data(), buf.size())) > 0)
+            all.insert(all.end(), buf.begin(), buf.begin() + n);
+        // count rising zero crossings over the last half (settled region)
+        int crossings = 0;
+        for (size_t i = all.size() / 2 + 1; i < all.size(); i++)
+            if (all[i - 1] < 0 && all[i] >= 0) crossings++;
+        const double seconds = (all.size() / 2.0) / 48000.0;
+        const double measured = crossings / seconds;
+        const double expected = 2'000'000.0 / (32.0 * tp);
+        std::printf("[ssg] TP=%3d expected %7.1f Hz measured %7.1f Hz (ratio %.4f)\n",
+                    tp, expected, measured, measured / expected);
+        std::vector<int16_t> wav;
+        for (float v : all) wav.push_back((int16_t)(std::max(-1.f, std::min(1.f, v)) * 32767));
+        char path[64];
+        std::snprintf(path, sizeof(path), "ssg_test_tp%d.wav", tp);
+        mz::write_wav16(path, wav, 48000, 1);
+    }
+    return 0;
+}
+
 void usage() {
     std::printf(
         "mz2500w-cli - headless MZ-2500 web emulator core\n"
@@ -165,6 +215,8 @@ int main(int argc, char** argv) {
     std::string screenshot_path;
     std::string audio_wav_path;
     std::string trace_opn_path;
+    bool mute_fm = false, mute_ssg = false;
+    long fm_lpf_hz = -1;
     long audio_start = 0, audio_end = -1;
     std::vector<uint16_t> memory_reports;
     std::vector<uint16_t> trace_addrs;
@@ -191,6 +243,8 @@ int main(int argc, char** argv) {
         auto value = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (arg == "--selftest") {
             return run_selftest();
+        } else if (arg == "--ssg-test") {
+            return run_ssg_test();
         } else if (arg == "--disk-a") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -262,6 +316,14 @@ int main(int argc, char** argv) {
         } else if (arg == "--audio-range") {
             const char* v = value();
             if (!v || std::sscanf(v, "%ld:%ld", &audio_start, &audio_end) != 2) { usage(); return 2; }
+        } else if (arg == "--fm-lpf-hz") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            fm_lpf_hz = std::strtol(v, nullptr, 10);
+        } else if (arg == "--mute-fm") {
+            mute_fm = true;
+        } else if (arg == "--mute-ssg") {
+            mute_ssg = true;
         } else if (arg == "--trace-opn") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -288,6 +350,8 @@ int main(int argc, char** argv) {
     if (boot_delay >= 0) machine.set_boot_delay_frames(static_cast<int>(boot_delay));
     if (fdc_latency_us >= 0) machine.fdc().set_read_latency_us(static_cast<uint32_t>(fdc_latency_us));
     if (fdc_step_us >= 0) machine.fdc().set_step_time_us(static_cast<uint32_t>(fdc_step_us));
+    if (mute_fm || mute_ssg) machine.opn().set_layer_gains(mute_fm ? 0.f : 1.f, mute_ssg ? 0.f : 1.f);
+    if (fm_lpf_hz >= 0) machine.opn().set_fm_lowpass_hz(static_cast<uint32_t>(fm_lpf_hz));
     if (!machine.insert_disk(0, disk_a)) return 1;
     if (!disk_b.empty() && !machine.insert_disk(1, disk_b)) return 1;
     if (!machine.boot_from_disk()) return 1;

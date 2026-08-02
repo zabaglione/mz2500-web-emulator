@@ -9,7 +9,7 @@
 <meta property="og:description" content="実機ROM不要のブラウザ版MZ-2500エミュレータで、猫が走る。SPACEで決定、カーソルで移動、Zでダッシュ。">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐱</text></svg>">
-<link rel="stylesheet" href="style.css?v=20260802155425">
+<link rel="stylesheet" href="style.css?v=20260802162407">
 </head>
 <body>
 <main>
@@ -27,12 +27,14 @@
       <span class="dname" id="dname0">-</span>
       <select id="vol0" class="volsel" hidden></select>
       <button class="insbtn" id="ins0" title="ディスク入替（リセットしません）">入替</button>
+      <button class="insbtn" id="eject0" title="このブラウザに保存したディスクを消去（次回起動はデモに戻ります）">&#9167;</button>
     </span>
     <span class="drive">
       <span class="lamp" id="lamp1">&#9679;</span><span class="dlabel">FD2</span>
       <span class="dname" id="dname1">(empty)</span>
       <select id="vol1" class="volsel" hidden></select>
       <button class="insbtn" id="ins1" title="ディスク入替（リセットしません）">入替</button>
+      <button class="insbtn" id="eject1" title="このブラウザに保存したディスクを消去">&#9167;</button>
     </span>
     <button id="reset-btn" title="FD1のディスクから再起動">RESET</button>
     <input type="file" id="file0" accept=".d88" hidden>
@@ -47,7 +49,8 @@
     <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ ・ ゲームパッド対応</p>
     <p>画面へ D88 をドロップ = FD1 に入れて起動（IPLPRO ブートのみ）。
       各ドライブの「入替」やドライブ枠へのドロップ = リセットせずディスク交換。
-      複数ボリューム入り D88 は自動分割され、ドライブ横のプルダウンで枚を切り替えられます（2枚組対応）。</p>
+      複数ボリューム入り D88 は自動分割され、ドライブ横のプルダウンで枚を切り替えられます（2枚組対応）。
+      入れたディスクは<strong>このブラウザ内に保存</strong>され（外部送信なし）、次回もそのまま起動します。⏏ で保存を消去。</p>
     <p>同梱の <strong>NEKO CAN RUN デモ版</strong>（WORLD 1）は動作検証を兼ねたサンプルです。
       デモ版・製品版（有償・全4ワールド）は
       <a href="https://zabaglione.booth.pm/items/8672891" target="_blank" rel="noopener">BOOTH（ザバイオーネ研究室）</a>
@@ -57,8 +60,8 @@
       挙動検証は EmuZ-2500 (Common Source Code Project) をブラックボックスオラクルとして実施。</p>
   </section>
 </main>
-<script>window.BUILD_ID = "20260802155425";</script>
-<script src="mz2500w.js?v=20260802155425"></script>
-<script src="emulator.js?v=20260802155425"></script>
+<script>window.BUILD_ID = "20260802162407";</script>
+<script src="mz2500w.js?v=20260802162407"></script>
+<script src="emulator.js?v=20260802162407"></script>
 </body>
 </html>

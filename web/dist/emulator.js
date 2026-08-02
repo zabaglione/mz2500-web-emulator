@@ -81,6 +81,39 @@ function d88Volumes(bytes) {
 // drive state: null or { name, volumes, current }
 const drives = [null, null];
 
+// ---- persistence (IndexedDB): inserted disks survive reloads ------------
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("mz2500w", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("drives");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function saveDriveToStore(drive, name, bytes, current) {
+  try {
+    const db = await idb();
+    db.transaction("drives", "readwrite").objectStore("drives")
+      .put({ name, buffer: bytes.slice().buffer, current: current | 0 }, drive);
+  } catch (e) { /* private mode etc.: persistence is best-effort */ }
+}
+async function loadDriveFromStore(drive) {
+  try {
+    const db = await idb();
+    return await new Promise((res) => {
+      const rq = db.transaction("drives").objectStore("drives").get(drive);
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror = () => res(null);
+    });
+  } catch (e) { return null; }
+}
+async function clearDriveStore(drive) {
+  try {
+    const db = await idb();
+    db.transaction("drives", "readwrite").objectStore("drives").delete(drive);
+  } catch (e) { /* ignore */ }
+}
+
 function refreshDriveUI(drive) {
   const d = drives[drive];
   if (!d) {
@@ -116,13 +149,14 @@ function pushVolume(drive) {
 }
 
 // Hot swap (no reset). Returns true when the image parsed.
-function insertFile(drive, name, bytes) {
+function insertFile(drive, name, bytes, opts) {
   const volumes = d88Volumes(bytes);
   if (volumes.length === 0) {
     statusEl.textContent = "NOT A D88 IMAGE";
     return false;
   }
-  drives[drive] = { name, volumes, current: 0 };
+  drives[drive] = { name, volumes, current: (opts && opts.current) || 0 };
+  if (!opts || !opts.noSave) saveDriveToStore(drive, name, bytes, drives[drive].current);
   return pushVolume(drive);
 }
 
@@ -150,7 +184,7 @@ function coldBoot() {
 }
 
 // canvas drop / initial load: mount into FD1 (volume 2 goes to FD2) and boot
-function bootFromFile(name, bytes) {
+function bootFromFile(name, bytes, opts) {
   const volumes = d88Volumes(bytes);
   if (volumes.length === 0) {
     statusEl.textContent = "NOT A D88 IMAGE";
@@ -158,6 +192,10 @@ function bootFromFile(name, bytes) {
   }
   drives[0] = { name, volumes, current: 0 };
   if (volumes.length > 1) drives[1] = { name, volumes, current: 1 };
+  if (!opts || !opts.noSave) {
+    saveDriveToStore(0, name, bytes, 0);
+    if (volumes.length > 1) saveDriveToStore(1, name, bytes, 1);
+  }
   coldBoot();
 }
 
@@ -183,12 +221,32 @@ async function powerOn() {
   Module = await createMZ2500();
   Module._emu_init(audioCtx.sampleRate);
 
+  // restore disks saved in this browser (IndexedDB); FD1 boots in place of
+  // the bundled demo, FD2 is remounted alongside
+  const saved0 = await loadDriveFromStore(0);
+  const saved1 = await loadDriveFromStore(1);
+  if (saved1) {
+    insertFile(1, saved1.name, new Uint8Array(saved1.buffer),
+               { noSave: true, current: saved1.current });
+  }
+  if (saved0) {
+    const bytes = new Uint8Array(saved0.buffer);
+    const volumes = d88Volumes(bytes);
+    if (volumes.length > 0) {
+      drives[0] = { name: saved0.name, volumes, current: saved0.current || 0 };
+      coldBoot();
+      return;
+    }
+  }
+
   const resp = await fetch("neko_can_run_demo.d88?v=" + v);
   if (!resp.ok) {
     statusEl.textContent = "DISK FETCH FAILED";
     return;
   }
-  bootFromFile("neko_can_run_demo.d88", new Uint8Array(await resp.arrayBuffer()));
+  // the bundled demo is not persisted; only user-inserted disks are
+  bootFromFile("neko_can_run_demo.d88", new Uint8Array(await resp.arrayBuffer()),
+               { noSave: true });
 }
 
 function pumpAudio() {
@@ -310,6 +368,16 @@ for (const drive of [0, 1]) {
     if (!d) return;
     d.current = parseInt(volEls[drive].value, 10) || 0;
     pushVolume(drive); // hot swap to the chosen volume
+    loadDriveFromStore(drive).then((saved) => {
+      if (saved && saved.name === d.name)
+        saveDriveToStore(drive, saved.name, new Uint8Array(saved.buffer), d.current);
+    });
+  });
+  document.getElementById("eject" + drive).addEventListener("click", () => {
+    clearDriveStore(drive);
+    dnameEls[drive].textContent = drives[drive]
+      ? dnameEls[drive].textContent + " (保存消去)"
+      : "(empty)";
   });
   const box = document.getElementById("ins" + drive).parentElement;
   box.addEventListener("dragover", (e) => {
