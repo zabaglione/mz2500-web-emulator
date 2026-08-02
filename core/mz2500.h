@@ -101,6 +101,11 @@ public:
     // Returns the number of bytes written (excluding the terminator).
     size_t debug_json(char* buf, size_t cap);
 
+    // Firmware forensics: when PC first reaches `addr`, dump the recent
+    // execution and I/O history to stderr (CLI --trace-trap).
+    void set_trap_watch(uint16_t addr) { trap_watch_ = addr; trap_hit_ = false; }
+    void dump_forensics(const char* why);
+
 private:
     static uint8_t cb_read(void* ud, uint16_t addr);
     static void cb_write(void* ud, uint16_t addr, uint8_t value);
@@ -111,7 +116,6 @@ private:
     void io_out(uint16_t port, uint8_t value);
     uint8_t blank_flags() const; // port F4h read: bit0 VBLANK, bit1 HBLANK
     void log_port_once(uint16_t port, const char* dir);
-    void pit_write_counter(uint8_t value);
     void service_interrupts();
 
     z80 cpu_{};
@@ -129,6 +133,7 @@ private:
     uint8_t font_size_ = 0;       // port F7h
     uint8_t gde_index_ = 0;       // port BCh
     uint8_t gde_regs_[32] = {};   // port BDh
+    uint64_t gde_busy_until_ = 0; // hardware GRAM clear in progress
     uint8_t palette_[32] = {};    // port AEh, indexed by B register
     // interrupt controller (C6h/C7h) + 8253 ch0. MZSD is the only client:
     // C6h bit2 enables the i8253 source, bit6 selects it as the C7h vector
@@ -137,18 +142,46 @@ private:
     uint8_t int_vector_ = 0;      // port C7h
     bool pit_int_pending_ = false;
 
-    // 8253 ch0, mode 2: input clock CPU/192 (31.25 kHz)
-    uint16_t pit_reload_ = 0;     // 0 means 65536
-    uint8_t pit_write_phase_ = 0; // 0 = expect low byte, 1 = expect high
-    bool pit_counting_ = false;
+    // 8253, all three channels driven from CPU/192 (31.25 kHz). Channel 0
+    // feeds the interrupt controller (MZSD's 125 Hz heartbeat); the firmware
+    // additionally programs ch1/ch2 and polls their counters for delays.
+    struct PitChannel {
+        uint8_t control = 0;   // last mode word
+        uint16_t reload = 0;   // 0 means 65536
+        uint8_t wr_phase = 0;  // lo/hi assembly state
+        uint8_t rd_phase = 0;
+        uint16_t latch = 0;
+        bool latched = false;
+        bool counting = false;
+        uint64_t start_cyc = 0;
+        uint32_t count() const { return reload ? reload : 0x10000; }
+    };
+    PitChannel pit_[3];
+    bool pit_counting_ = false;   // ch0 interrupt scheduling
     uint64_t pit_next_fire_ = 0;
+    uint16_t pit_current(int ch) const;
+    void pit_write_control(uint8_t value);
+    void pit_write_counter(int ch, uint8_t value);
+    uint8_t pit_read_counter(int ch);
     uint8_t pio_a_ = 0;           // port E8h latch
     uint8_t bank_mode_ = 0;       // port B7h latch
     uint8_t ppi_[3] = {};         // 8255 A/B/C latches (E0h-E2h)
+    uint8_t pio_ctrl_[2] = {};    // Z80 PIO control words (E9h/EBh)
     bool mz1m10_present_ = true;  // 4096-colour palette board option
     uint8_t joy_enable_ = 0;      // port EFh
     uint8_t key_rows_[16] = {};   // pressed bits per matrix row
     uint8_t joy_mask_ = 0;        // pressed joystick bits
+
+    // forensics rings (always recorded; cheap)
+    static constexpr int PC_RING = 128;
+    static constexpr int IO_RING = 64;
+    uint16_t pc_ring_[PC_RING] = {};
+    int pc_ring_pos_ = 0;
+    struct IoEvent { uint64_t cyc; uint16_t port; uint8_t value; bool out; };
+    IoEvent io_ring_[IO_RING] = {};
+    int io_ring_pos_ = 0;
+    int trap_watch_ = -1;
+    bool trap_hit_ = false;
 
     uint64_t frame_origin_ = 0;
     uint64_t frames_ = 0;

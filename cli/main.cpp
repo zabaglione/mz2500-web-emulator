@@ -220,6 +220,9 @@ int main(int argc, char** argv) {
     std::string rom_dir;
     bool real_ipl = false;
     bool no_exp_ram = false, no_exp_gram = false, no_mz1m10 = false;
+    long trace_trap = -1;
+    bool dump_io = false;
+    long ram_dump_addr = -1; unsigned ram_dump_len = 0;
     long audio_start = 0, audio_end = -1;
     std::vector<uint16_t> memory_reports;
     std::vector<uint16_t> trace_addrs;
@@ -325,6 +328,18 @@ int main(int argc, char** argv) {
             rom_dir = v;
         } else if (arg == "--real-ipl") {
             real_ipl = true;
+        } else if (arg == "--ram-dump") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            unsigned a=0, l=0;
+            if (std::sscanf(v, "%x:%x", &a, &l) != 2) { usage(); return 2; }
+            ram_dump_addr = a; ram_dump_len = l;
+        } else if (arg == "--dump-io") {
+            dump_io = true;
+        } else if (arg == "--trace-trap") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            trace_trap = std::strtol(v, nullptr, 16);
         } else if (arg == "--no-exp-ram") {
             no_exp_ram = true;
         } else if (arg == "--no-exp-gram") {
@@ -367,6 +382,7 @@ int main(int argc, char** argv) {
     if (fdc_step_us >= 0) machine.fdc().set_step_time_us(static_cast<uint32_t>(fdc_step_us));
     if (mute_fm || mute_ssg) machine.opn().set_layer_gains(mute_fm ? 0.f : 1.f, mute_ssg ? 0.f : 1.f);
     if (fm_lpf_hz >= 0) machine.opn().set_fm_lowpass_hz(static_cast<uint32_t>(fm_lpf_hz));
+    if (trace_trap >= 0) machine.set_trap_watch((uint16_t)trace_trap);
     if (no_exp_ram) machine.set_hw_option(0, false);
     if (no_exp_gram) machine.set_hw_option(1, false);
     if (no_mz1m10) machine.set_hw_option(2, false);
@@ -458,6 +474,14 @@ int main(int argc, char** argv) {
     for (uint16_t addr : memory_reports) {
         std::printf("memory[%04x]=%02x\n", addr, machine.read_memory(addr));
     }
+    if (ram_dump_addr >= 0) {
+        for (unsigned i = 0; i < ram_dump_len; i++) {
+            if (i % 16 == 0) std::printf("\n%04x:", (unsigned)(ram_dump_addr + i));
+            std::printf(" %02x", machine.read_memory((uint16_t)(ram_dump_addr + i)));
+        }
+        std::printf("\n");
+    }
+    if (dump_io) machine.dump_forensics("exit");
     if (trace_opn) std::fclose(trace_opn);
     if (!audio_wav_path.empty()) {
         if (!mz::write_wav16(audio_wav_path, wav_samples, machine.opn().output_rate(), 1)) {

@@ -41,7 +41,7 @@ bool Mz2500::boot_from_disk() {
     fdc_.reset();
     opn_.reset();
     pit_counting_ = false;
-    pit_write_phase_ = 0;
+    for (auto& c : pit_) c = PitChannel{};
     pit_int_pending_ = false;
     pio_a_ = 0;
     joy_mask_ = 0;
@@ -101,7 +101,7 @@ bool Mz2500::boot_with_real_ipl() {
     fdc_.reset();
     opn_.reset();
     pit_counting_ = false;
-    pit_write_phase_ = 0;
+    for (auto& c : pit_) c = PitChannel{};
     pit_int_pending_ = false;
     pio_a_ = 0;
     joy_mask_ = 0;
