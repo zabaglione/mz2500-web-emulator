@@ -283,6 +283,53 @@ function restartAudio() {
   audioT0 = audioCtx.currentTime;
 }
 
+// Watchdog for the experimental real-IPL boot: if the firmware parks in a
+// trap loop (constant PC while frames advance, or HALT), fall back to the
+// dummy IPL automatically so a stored setting can never leave the screen
+// black across reloads.
+let iplWatchTimer = null;
+let iplWatchLastPc = -1;
+let iplWatchLastFrame = -1;
+let iplWatchSame = 0;
+let iplWatchTicks = 0;
+
+function stopIplWatchdog() {
+  if (iplWatchTimer) clearInterval(iplWatchTimer);
+  iplWatchTimer = null;
+}
+
+function checkRealIplStall() {
+  if (!Module || !running) return false;
+  const j = JSON.parse(Module.UTF8ToString(Module._emu_debug_json()));
+  const advanced = j.frames !== iplWatchLastFrame;
+  iplWatchLastFrame = j.frames;
+  if (!advanced) return false; // paused/hidden: no verdict
+  if (j.cpu.halted || j.cpu.pc === iplWatchLastPc) iplWatchSame++;
+  else iplWatchSame = 0;
+  iplWatchLastPc = j.cpu.pc;
+  iplWatchTicks++;
+  if (iplWatchSame >= 3) {
+    stopIplWatchdog();
+    realIplEl.checked = false;
+    localStorage.setItem("mzw_real_ipl", "0");
+    coldBoot();
+    statusEl.textContent =
+      `IPL停止検出 (PC=${j.cpu.pc.toString(16).toUpperCase()}h) → ダミーIPLで再起動しました`;
+    return true;
+  }
+  if (iplWatchTicks > 20) stopIplWatchdog(); // firmware looks alive
+  return false;
+}
+
+function startIplWatchdog() {
+  stopIplWatchdog();
+  iplWatchLastPc = -1;
+  iplWatchLastFrame = -1;
+  iplWatchSame = 0;
+  iplWatchTicks = 0;
+  iplWatchTimer = setInterval(checkRealIplStall, 1000);
+}
+
 function coldBoot() {
   if (!Module) return;
   const wantRealIpl = realIplEl.checked && Module._emu_has_ipl();
@@ -295,7 +342,13 @@ function coldBoot() {
     statusEl.textContent = "NOT A BOOTABLE DISK";
     return;
   }
-  statusEl.textContent = wantRealIpl ? "RUNNING (REAL IPL)" : "RUNNING";
+  if (wantRealIpl) {
+    statusEl.textContent = "RUNNING (REAL IPL)";
+    startIplWatchdog();
+  } else {
+    statusEl.textContent = "RUNNING";
+    stopIplWatchdog();
+  }
   restartAudio();
   if (!running) {
     running = true;
