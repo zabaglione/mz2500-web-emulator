@@ -165,8 +165,9 @@ async function powerOn() {
   overlay.classList.add("hidden");
   statusEl.textContent = "BOOTING...";
 
+  const v = encodeURIComponent(window.BUILD_ID || "dev");
   audioCtx = new AudioContext();
-  await audioCtx.audioWorklet.addModule("audio-worklet.js");
+  await audioCtx.audioWorklet.addModule("audio-worklet.js?v=" + v);
   workletNode = new AudioWorkletNode(audioCtx, "mz-audio", { outputChannelCount: [2] });
   workletNode.connect(audioCtx.destination);
   workletNode.port.onmessage = (e) => {
@@ -182,7 +183,7 @@ async function powerOn() {
   Module = await createMZ2500();
   Module._emu_init(audioCtx.sampleRate);
 
-  const resp = await fetch("neko_can_run_demo.d88");
+  const resp = await fetch("neko_can_run_demo.d88?v=" + v);
   if (!resp.ok) {
     statusEl.textContent = "DISK FETCH FAILED";
     return;
