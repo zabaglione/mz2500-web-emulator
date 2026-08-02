@@ -68,4 +68,9 @@ EMSCRIPTEN_KEEPALIVE int emu_frames() {
     return g_machine ? (int)g_machine->frames() : 0;
 }
 
+// FDD access lamp: the drive-select/motor line, like the LED on a real drive
+EMSCRIPTEN_KEEPALIVE int emu_fdd_motor() {
+    return (g_machine && g_machine->fdc().motor_on()) ? 1 : 0;
+}
+
 } // extern "C"

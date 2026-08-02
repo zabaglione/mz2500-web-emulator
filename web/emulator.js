@@ -1,10 +1,12 @@
-// Frontend: loads the wasm core, paces it at the MZ-2500 frame rate with a
-// time accumulator, feeds the canvas and the audio worklet, and maps
-// keyboard / gamepad input onto the keyboard matrix and joystick port.
+// Frontend: loads the wasm core and paces it off the AUDIO CLOCK - frames
+// are emulated only while the audio queue sits below a small target depth,
+// so audible latency stays pinned near TARGET_MS instead of accumulating.
+// (The worklet additionally hard-caps its queue and drops the oldest
+// samples, so delay is bounded even if this estimate ever drifts.)
 "use strict";
 
-const FPS = 6000000 / 108160; // ~55.47, must match core/timing.h
-const FRAME_MS = 1000 / FPS;
+const TARGET_MS = 50;         // audio depth the pacing loop maintains
+const MAX_STEPS_PER_TICK = 12; // catch-up bound after a stalled tab
 
 // KeyboardEvent.code -> [row, bit]; matches core/keyboard.h
 const KEYMAP = new Map([
@@ -29,17 +31,23 @@ const overlay = document.getElementById("overlay");
 const statusEl = document.getElementById("status");
 const fpsEl = document.getElementById("fps");
 const audioStatEl = document.getElementById("audio-stat");
+const fddEl = document.getElementById("fdd");
 
 let Module = null;
 let audioCtx = null;
 let workletNode = null;
 let running = false;
-let acc = 0;
-let last = 0;
+
+// audio-clock bookkeeping: samples handed to the worklet vs. samples the
+// hardware has consumed (audioCtx.currentTime is the consumption clock)
+let produced = 0;
+let audioT0 = 0;
+let underruns = 0;
+let dropped = 0;
+let lastReportedQueued = 0;
+
 let framesShown = 0;
 let fpsWindowStart = 0;
-let queuedSamples = 0;
-let underruns = 0;
 
 async function powerOn() {
   overlay.classList.add("hidden");
@@ -50,9 +58,14 @@ async function powerOn() {
   workletNode = new AudioWorkletNode(audioCtx, "mz-audio", { outputChannelCount: [2] });
   workletNode.connect(audioCtx.destination);
   workletNode.port.onmessage = (e) => {
-    queuedSamples = e.data.queued;
     underruns = e.data.underruns;
+    dropped = e.data.dropped;
+    lastReportedQueued = e.data.queued;
+    // snap the depth estimate to the worklet's ground truth (heals both
+    // underrun silence-fill and any counter drift)
+    produced = (audioCtx.currentTime - audioT0) * audioCtx.sampleRate + e.data.queued;
   };
+  await audioCtx.resume();
 
   Module = await createMZ2500();
   Module._emu_init(audioCtx.sampleRate);
@@ -75,21 +88,27 @@ function bootDisk(bytes) {
     return;
   }
   statusEl.textContent = "RUNNING";
+  workletNode.port.postMessage({ flush: 1 });
+  produced = 0;
+  audioT0 = audioCtx.currentTime;
   if (!running) {
     running = true;
-    last = performance.now();
-    fpsWindowStart = last;
+    fpsWindowStart = performance.now();
     requestAnimationFrame(tick);
   }
 }
 
 function pumpAudio() {
-  const n = Module._emu_read_audio();
-  if (n > 0) {
+  let total = 0;
+  for (;;) {
+    const n = Module._emu_read_audio();
+    if (n <= 0) break;
     const ptr = Module._emu_audio_buffer() >> 2;
     const samples = new Float32Array(Module.HEAPF32.subarray(ptr, ptr + n));
     workletNode.port.postMessage({ samples }, [samples.buffer]);
+    total += n;
   }
+  return total;
 }
 
 function blit() {
@@ -100,21 +119,19 @@ function blit() {
 
 function tick(now) {
   if (!running) return;
-  acc += now - last;
-  last = now;
+  const rate = audioCtx.sampleRate;
+  const target = (TARGET_MS / 1000) * rate;
 
-  // audio-queue feedback: nudge pacing +-0.5% to hold 60-100ms of buffer
-  const target = audioCtx.sampleRate * 0.08;
-  const nudge = queuedSamples > target * 1.3 ? 1.005 : queuedSamples < target * 0.7 ? 0.995 : 1.0;
-
+  // While the tab is hidden the context is suspended: currentTime freezes,
+  // depth stays at target, and emulation pauses by itself.
   let steps = 0;
-  while (acc >= FRAME_MS * nudge && steps < 6) {
+  while (steps < MAX_STEPS_PER_TICK) {
+    const consumed = (audioCtx.currentTime - audioT0) * rate;
+    if (produced - consumed >= target) break;
     Module._emu_run_frame();
-    pumpAudio();
-    acc -= FRAME_MS * nudge;
+    produced += pumpAudio();
     steps++;
   }
-  if (steps === 6) acc = 0; // fell behind: drop the debt instead of spiraling
 
   pollGamepad();
   if (steps > 0) {
@@ -122,9 +139,13 @@ function tick(now) {
     blit();
     framesShown += steps;
   }
+  fddEl.classList.toggle("on", Module._emu_fdd_motor() !== 0);
+
   if (now - fpsWindowStart > 1000) {
+    const bufMs = (lastReportedQueued / rate * 1000) | 0;
     fpsEl.textContent = `${(framesShown * 1000 / (now - fpsWindowStart)).toFixed(1)} fps`;
-    audioStatEl.textContent = `audio ${(queuedSamples / audioCtx.sampleRate * 1000) | 0}ms buf, ${underruns} underruns`;
+    audioStatEl.textContent =
+      `audio ${bufMs}ms buf, ${underruns} underruns` + (dropped ? `, ${dropped} dropped` : "");
     workletNode.port.postMessage({ query: 1 });
     framesShown = 0;
     fpsWindowStart = now;
@@ -167,13 +188,14 @@ function pollGamepad() {
 
 // ---- pause when hidden ----------------------------------------------------
 document.addEventListener("visibilitychange", () => {
-  if (!audioCtx) return;
+  if (!audioCtx || !workletNode) return;
   if (document.hidden) {
     audioCtx.suspend();
-    acc = 0;
   } else {
+    // drop anything queued while frozen and restart from a clean depth
+    workletNode.port.postMessage({ flush: 1 });
+    produced = (audioCtx.currentTime - audioT0) * audioCtx.sampleRate;
     audioCtx.resume();
-    last = performance.now();
   }
 });
 

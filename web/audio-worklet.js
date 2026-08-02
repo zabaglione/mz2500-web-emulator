@@ -1,6 +1,13 @@
-// Queue-based audio output: the main thread posts Float32Array chunks after
-// each emulated frame; this processor drains them at the hardware rate.
-// No SharedArrayBuffer (GitHub Pages cannot serve COOP/COEP headers).
+// Queue-based audio output: the main thread posts Float32Array chunks; this
+// processor drains them at the hardware rate. No SharedArrayBuffer (GitHub
+// Pages cannot serve COOP/COEP headers).
+//
+// Latency discipline: the queue is HARD-CAPPED. If the producer ever gets
+// ahead (tab hiccups, clock drift), the oldest samples are dropped so
+// audible delay can never exceed CAP_SECONDS - the main thread's depth
+// gating keeps it far below that in normal play.
+const CAP_SECONDS = 0.25;
+
 class MZAudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -8,12 +15,28 @@ class MZAudioProcessor extends AudioWorkletProcessor {
     this.queued = 0; // total samples queued
     this.offset = 0; // read offset into queue[0]
     this.underruns = 0;
+    this.dropped = 0;
     this.port.onmessage = (e) => {
       if (e.data.samples) {
         this.queue.push(e.data.samples);
         this.queued += e.data.samples.length;
+        const cap = sampleRate * CAP_SECONDS;
+        while (this.queued > cap && this.queue.length > 1) {
+          const old = this.queue.shift();
+          this.queued -= old.length - this.offset;
+          this.dropped += old.length - this.offset;
+          this.offset = 0;
+        }
+      } else if (e.data.flush) {
+        this.queue = [];
+        this.queued = 0;
+        this.offset = 0;
       } else if (e.data.query) {
-        this.port.postMessage({ queued: this.queued, underruns: this.underruns });
+        this.port.postMessage({
+          queued: this.queued,
+          underruns: this.underruns,
+          dropped: this.dropped,
+        });
       }
     };
   }
