@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MZ-2500 Web Emulator - NEKO CAN RUN</title>
+<meta name="description" content="SHARP MZ-2500エミュレータ（ブラウザ版・実機ROM不要）。自作アクションゲーム NEKO CAN RUN をそのままプレイできます。">
+<meta property="og:title" content="MZ-2500 Web Emulator - NEKO CAN RUN">
+<meta property="og:description" content="実機ROM不要のブラウザ版MZ-2500エミュレータで、猫が走る。SPACEで決定、カーソルで移動、Zでダッシュ。">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐱</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span></h1>
+  <div id="screen-wrap">
+    <canvas id="screen" width="640" height="400"></canvas>
+    <div id="overlay">
+      <button id="power">POWER ON</button>
+      <p class="hint">NEKO CAN RUN デモ版（WORLD 1）を起動します（音が出ます）</p>
+    </div>
+  </div>
+  <div id="statusbar">
+    <span id="status">POWER OFF</span>
+    <span id="fps"></span>
+    <span id="audio-stat"></span>
+  </div>
+  <section class="help">
+    <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ ・ ゲームパッド対応</p>
+    <p>手持ちの MZ-2500 用 D88 をここへドラッグ＆ドロップしても起動できます（IPLPRO ブートのみ）。</p>
+    <p>同梱の <strong>NEKO CAN RUN デモ版</strong>（WORLD 1）は動作検証を兼ねたサンプルです。
+      製品版（全4ワールド）は <a id="booth-link" href="#" rel="noopener">BOOTH</a> にて。</p>
+    <p class="fine">本体ROM不使用（ブートはネイティブ代替実装）。ゲーム: (C) 2026 ZABAGLIONE PROJECT /
+      Emulator: MIT License, CPU core: superzazu/z80 (MIT), FM: ymfm (BSD-3-Clause).
+      挙動検証は EmuZ-2500 (Common Source Code Project) をブラックボックスオラクルとして実施。</p>
+  </section>
+</main>
+<script src="mz2500w.js"></script>
+<script src="emulator.js"></script>
+</body>
+</html>
