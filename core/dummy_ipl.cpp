@@ -42,7 +42,9 @@ bool Mz2500::boot_from_disk() {
     opn_.reset();
     pit_counting_ = false;
     for (auto& c : pit_) c = PitChannel{};
-    pit_int_pending_ = false;
+    for (auto& p : int_pending_) p = false;
+    for (auto& v : int_vectors_) v = 0;
+    tick_next_[0] = tick_next_[1] = 0;
     pio_a_ = 0;
     joy_mask_ = 0;
     std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
@@ -102,7 +104,9 @@ bool Mz2500::boot_with_real_ipl() {
     opn_.reset();
     pit_counting_ = false;
     for (auto& c : pit_) c = PitChannel{};
-    pit_int_pending_ = false;
+    for (auto& p : int_pending_) p = false;
+    for (auto& v : int_vectors_) v = 0;
+    tick_next_[0] = tick_next_[1] = 0;
     pio_a_ = 0;
     joy_mask_ = 0;
     std::memset(crtc_regs_, 0, sizeof(crtc_regs_));

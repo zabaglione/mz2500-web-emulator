@@ -108,4 +108,13 @@ EMSCRIPTEN_KEEPALIVE int emu_read_mem(int addr) {
     return g_machine ? g_machine->read_memory((uint16_t)addr) : 0;
 }
 
+// count of non-black pixels in the last rendered frame (blank-screen detector)
+EMSCRIPTEN_KEEPALIVE int emu_frame_nonblack() {
+    int n = 0;
+    for (size_t i = 0; i < g_frame.size(); i += 4) {
+        if (g_frame[i] | g_frame[i + 1] | g_frame[i + 2]) n++;
+    }
+    return n;
+}
+
 } // extern "C"

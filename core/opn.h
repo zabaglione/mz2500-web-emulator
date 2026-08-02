@@ -46,6 +46,10 @@ public:
     // debug mixing controls (CLI layer-isolation tests)
     void set_layer_gains(float fm, float ssg) { fm_mix_ = fm; ssg_mix_ = ssg; }
 
+    // 1-bit beeper line (the firmware's error tone on port CAh); mixed into
+    // the output stream at the caller's flush timing
+    void set_beeper_level(bool on) { beeper_ = on ? 0.08f : 0.0f; }
+
     // Analog output-stage voicing: the real YM2203 synthesizes FM at
     // clock/72 (27.8 kHz), so partials above 13.9 kHz fold down as a gritty
     // fizz - authentic silicon behaviour, but the real MZ-2500's analog
@@ -84,6 +88,7 @@ private:
 
     float fm_mix_ = 1.0f;
     float ssg_mix_ = 1.0f;
+    float beeper_ = 0.0f;
     uint32_t fm_lpf_hz_ = 5000;
     Biquad fm_lp1_, fm_lp2_;
 

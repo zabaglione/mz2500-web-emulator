@@ -309,6 +309,15 @@ function checkRealIplStall() {
   iplWatchLastPc = j.cpu.pc;
   iplWatchTicks++;
   if (iplWatchSame >= 3) {
+    // Only rescue a genuinely BLANK screen (bricked boot). If the firmware
+    // has drawn anything, a tight loop is normal behaviour (device search,
+    // error beeper) - report it and keep the real IPL running.
+    if (Module._emu_frame_nonblack() > 0) {
+      stopIplWatchdog();
+      statusEl.textContent =
+        `RUNNING (REAL IPL) - 待機ループ検出 PC=${j.cpu.pc.toString(16).toUpperCase()}h`;
+      return false;
+    }
     stopIplWatchdog();
     realIplEl.checked = false;
     localStorage.setItem("mzw_real_ipl", "0");

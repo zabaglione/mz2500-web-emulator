@@ -77,8 +77,19 @@ uint8_t Mz2500::io_in(uint16_t port) {
     case 0xC9: return opn_.read_data();
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
         return static_cast<uint8_t>(~fdc_.read((port & 0xFF) - 0xD8, cpu_.cyc));
-    case 0xE0: case 0xE1: case 0xE2:
-        return ppi_[(port & 0xFF) - 0xE0];
+    case 0xE0:
+        // 8255 port A = keyboard data for the firmware's scan (active low,
+        // FFh when idle); the row is strobed on port C's low nibble
+        return static_cast<uint8_t>(~key_rows_[ppi_[2] & 0x0F]);
+    case 0xE1:
+        // 8255 port B status inputs (decoded from the IPL's FD probe at its
+        // routine 752Dh): bit5 = FD interface absent, bit3 = drive ready.
+        // Report the interface present and ready whenever a disk is in the
+        // selected drive.
+        return (uint8_t)((ppi_[1] & ~0x28) |
+                         (disks_[fdc_.selected_drive()].loaded() ? 0x08 : 0x00));
+    case 0xE2:
+        return ppi_[2];
     case 0xE4: case 0xE5: case 0xE6:
         return pit_read_counter((port & 0xFF) - 0xE4);
     case 0xE8: return pio_a_;
@@ -124,11 +135,22 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         }
         gde_regs_[gde_index_] = value;
         return;
+    case 0xCA:
+        // firmware beeper strobe (error tone): bit4 drives the speaker line
+        opn_.flush_to(cpu_.cyc);
+        opn_.set_beeper_level((value & 0x10) != 0);
+        return;
     case 0xC6:
         int_select_ = value;
-        if (!(value & 0x04)) pit_int_pending_ = false; // masking drops the latch
+        for (int src = 0; src < 4; src++) {
+            if (!(value & (1 << src))) int_pending_[src] = false;
+        }
         return;
-    case 0xC7: int_vector_ = value; return;
+    case 0xC7:
+        for (int src = 0; src < 4; src++) {
+            if (int_select_ & (0x10 << src)) int_vectors_[src] = value;
+        }
+        return;
     case 0xC8:
         opn_addr_ = value;
         opn_.write_address(value, cpu_.cyc);
@@ -254,11 +276,27 @@ void Mz2500::service_interrupts() {
     if (pit_counting_ && cpu_.cyc >= pit_next_fire_) {
         const uint64_t period = (uint64_t)pit_[0].count() * PIT_CLOCK_DIV;
         while (cpu_.cyc >= pit_next_fire_) pit_next_fire_ += period; // merge missed ticks
-        if (int_select_ & 0x04) pit_int_pending_ = true;
+        if (int_select_ & 0x04) int_pending_[2] = true;
     }
-    if (pit_int_pending_ && cpu_.iff1 && !cpu_.iff_delay) {
-        pit_int_pending_ = false;
-        z80_gen_int(&cpu_, int_vector_);
+    // system tick sources 0 and 1 (identity under study; periodic delivery
+    // keeps the firmware's ISR-driven state machine advancing)
+    for (int src = 0; src < 2; src++) {
+        if (!(int_select_ & (1 << src))) continue;
+        constexpr uint64_t PERIOD = 100'000; // ~60 Hz
+        if (tick_next_[src] == 0) tick_next_[src] = cpu_.cyc + PERIOD;
+        if (cpu_.cyc >= tick_next_[src]) {
+            while (cpu_.cyc >= tick_next_[src]) tick_next_[src] += PERIOD;
+            int_pending_[src] = true;
+        }
+    }
+    if (cpu_.iff1 && !cpu_.iff_delay) {
+        for (int src = 3; src >= 0; src--) {
+            if (int_pending_[src] && (int_select_ & (1 << src))) {
+                int_pending_[src] = false;
+                z80_gen_int(&cpu_, int_vectors_[src]);
+                break;
+            }
+        }
     }
 }
 
@@ -286,7 +324,7 @@ size_t Mz2500::debug_json(char* buf, size_t cap) {
         (unsigned long long)fdc_.stat_seeks,
         gde_regs_[0x0E], sad0, gde_regs_[0x0F] & 7,
         (pio_a_ & 0x20) ? 1 : 0, mem_.kanji_bank(),
-        int_select_, int_vector_, pit_[0].reload, pit_counting_ ? 1 : 0,
+        int_select_, int_vectors_[2], pit_[0].reload, pit_counting_ ? 1 : 0,
         mem_.has_ipl_rom() ? 1 : 0);
     return written > 0 && (size_t)written < cap ? (size_t)written : 0;
 }

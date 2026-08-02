@@ -106,7 +106,7 @@ void OpnYm2203::flush_to(uint64_t now) {
         chip_.generate(&out);
         const float fm = fm_lp2_.run(fm_lp1_.run((float)out.data[0] * FM_GAIN));
         const float ssg = (float)(out.data[1] + out.data[2] + out.data[3]) * SSG_GAIN;
-        push_chip_sample(lp2_.run(lp1_.run(fm * fm_mix_ + ssg * ssg_mix_)));
+        push_chip_sample(lp2_.run(lp1_.run(fm * fm_mix_ + ssg * ssg_mix_ + beeper_)));
         generated_++;
     }
 }

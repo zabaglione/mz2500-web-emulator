@@ -138,9 +138,15 @@ private:
     // interrupt controller (C6h/C7h) + 8253 ch0. MZSD is the only client:
     // C6h bit2 enables the i8253 source, bit6 selects it as the C7h vector
     // destination; other sources (CRTC etc.) are unused by this game.
-    uint8_t int_select_ = 0;      // port C6h
-    uint8_t int_vector_ = 0;      // port C7h
-    bool pit_int_pending_ = false;
+    // Interrupt controller: C6h high nibble selects which source's vector
+    // register the next C7h write lands in (bit7..4 -> source 3..0), low
+    // nibble enables sources (bit3..0). Pairs decoded from the firmware:
+    // source 3 = CRTC, source 2 = i8253, sources 1/0 = periodic system
+    // ticks the firmware's ISRs expect (identity still under study).
+    uint8_t int_select_ = 0;      // port C6h latch
+    uint8_t int_vectors_[4] = {}; // per-source IM2 vector bytes
+    bool int_pending_[4] = {};
+    uint64_t tick_next_[2] = {0, 0}; // next fire for sources 0 and 1
 
     // 8253, all three channels driven from CPU/192 (31.25 kHz). Channel 0
     // feeds the interrupt controller (MZSD's 125 Hz heartbeat); the firmware
