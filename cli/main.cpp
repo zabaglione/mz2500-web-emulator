@@ -217,6 +217,9 @@ int main(int argc, char** argv) {
     std::string trace_opn_path;
     bool mute_fm = false, mute_ssg = false;
     long fm_lpf_hz = -1;
+    std::string rom_dir;
+    bool real_ipl = false;
+    bool no_exp_ram = false, no_exp_gram = false, no_mz1m10 = false;
     long audio_start = 0, audio_end = -1;
     std::vector<uint16_t> memory_reports;
     std::vector<uint16_t> trace_addrs;
@@ -316,6 +319,18 @@ int main(int argc, char** argv) {
         } else if (arg == "--audio-range") {
             const char* v = value();
             if (!v || std::sscanf(v, "%ld:%ld", &audio_start, &audio_end) != 2) { usage(); return 2; }
+        } else if (arg == "--rom-dir") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            rom_dir = v;
+        } else if (arg == "--real-ipl") {
+            real_ipl = true;
+        } else if (arg == "--no-exp-ram") {
+            no_exp_ram = true;
+        } else if (arg == "--no-exp-gram") {
+            no_exp_gram = true;
+        } else if (arg == "--no-mz1m10") {
+            no_mz1m10 = true;
         } else if (arg == "--fm-lpf-hz") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -352,9 +367,33 @@ int main(int argc, char** argv) {
     if (fdc_step_us >= 0) machine.fdc().set_step_time_us(static_cast<uint32_t>(fdc_step_us));
     if (mute_fm || mute_ssg) machine.opn().set_layer_gains(mute_fm ? 0.f : 1.f, mute_ssg ? 0.f : 1.f);
     if (fm_lpf_hz >= 0) machine.opn().set_fm_lowpass_hz(static_cast<uint32_t>(fm_lpf_hz));
+    if (no_exp_ram) machine.set_hw_option(0, false);
+    if (no_exp_gram) machine.set_hw_option(1, false);
+    if (no_mz1m10) machine.set_hw_option(2, false);
+    if (!rom_dir.empty()) {
+        static const struct { const char* file; int kind; } roms[] = {
+            {"ipl.rom", 0}, {"cg.rom", 1}, {"kanji.rom", 2}, {"dict.rom", 3}};
+        for (const auto& r : roms) {
+            const std::string path = rom_dir + "/" + r.file;
+            FILE* f = std::fopen(path.c_str(), "rb");
+            if (!f) continue;
+            std::fseek(f, 0, SEEK_END);
+            const long size = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            std::vector<uint8_t> bytes(size > 0 ? size : 0);
+            if (size > 0 && std::fread(bytes.data(), 1, size, f) == (size_t)size)
+                machine.set_rom(r.kind, bytes.data(), bytes.size());
+            std::fclose(f);
+        }
+    }
+
     if (!machine.insert_disk(0, disk_a)) return 1;
     if (!disk_b.empty() && !machine.insert_disk(1, disk_b)) return 1;
-    if (!machine.boot_from_disk()) return 1;
+    if (real_ipl) {
+        if (!machine.boot_with_real_ipl()) return 1;
+    } else if (!machine.boot_from_disk()) {
+        return 1;
+    }
 
     std::vector<int> trace_last(trace_addrs.size(), -1);
     std::vector<int16_t> wav_samples;

@@ -93,6 +93,42 @@ h1 .sub { color: var(--text); font-size: 14px; }
 }
 .insbtn:hover, #reset-btn:hover { border-color: var(--accent); }
 #reset-btn { margin-left: auto; }
+#debug-toggle {
+  margin-left: auto;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: #2a2a3a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+#debug-toggle.active { border-color: var(--accent); color: var(--accent); }
+#debug-panel {
+  background: var(--panel);
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  margin: 4px 0;
+}
+#debug-panel pre { margin: 0 0 6px; white-space: pre-wrap; color: #b8e0b8; }
+#debug-watch-row { color: #9a9ab0; }
+#debug-watch-row input {
+  font-family: inherit;
+  background: #14141c;
+  color: var(--text);
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+#debug-watch-out { color: #e0d8a0; margin-left: 8px; }
+#rom-config, #hw-config { font-size: 12px; color: #9a9ab0; margin: 8px 0; }
+#rom-config summary, #hw-config summary { cursor: pointer; }
+.rom-slot { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.rom-slot .rname { width: 80px; color: var(--accent); }
+.rom-slot .rstate { width: 180px; }
 .help { font-size: 12px; color: #9a9ab0; line-height: 1.6; }
 .help .fine { font-size: 10px; color: #667; }
 #screen-wrap.dragover { outline: 3px dashed var(--accent); }

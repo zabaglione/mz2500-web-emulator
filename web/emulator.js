@@ -84,8 +84,12 @@ const drives = [null, null];
 // ---- persistence (IndexedDB): inserted disks survive reloads ------------
 function idb() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open("mz2500w", 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("drives");
+    const r = indexedDB.open("mz2500w", 2);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains("drives")) db.createObjectStore("drives");
+      if (!db.objectStoreNames.contains("roms")) db.createObjectStore("roms");
+    };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
@@ -113,6 +117,119 @@ async function clearDriveStore(drive) {
     db.transaction("drives", "readwrite").objectStore("drives").delete(drive);
   } catch (e) { /* ignore */ }
 }
+
+// ---- user ROM slots (browser-local only; nothing is ever uploaded) -------
+const ROM_KINDS = [
+  { key: "ipl", kind: 0, label: "ipl.rom", note: "32KB / 実IPLブート用" },
+  { key: "cg", kind: 1, label: "cg.rom", note: "2KB / 保管のみ（未結線）" },
+  { key: "kanji", kind: 2, label: "kanji.rom", note: "256KB / バンク39h窓" },
+  { key: "dict", kind: 3, label: "dict.rom", note: "256KB / バンク3Ah窓" },
+];
+async function saveRomToStore(key, name, bytes) {
+  try {
+    const db = await idb();
+    db.transaction("roms", "readwrite").objectStore("roms")
+      .put({ name, buffer: bytes.slice().buffer }, key);
+  } catch (e) { /* best-effort */ }
+}
+async function loadRomFromStore(key) {
+  try {
+    const db = await idb();
+    return await new Promise((res) => {
+      const rq = db.transaction("roms").objectStore("roms").get(key);
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror = () => res(null);
+    });
+  } catch (e) { return null; }
+}
+async function clearRomStore(key) {
+  try {
+    const db = await idb();
+    db.transaction("roms", "readwrite").objectStore("roms").delete(key);
+  } catch (e) { /* ignore */ }
+}
+
+async function applyRomsToMachine() {
+  for (const slot of ROM_KINDS) {
+    const saved = await loadRomFromStore(slot.key);
+    if (!saved || !Module) continue;
+    const bytes = new Uint8Array(saved.buffer);
+    const ptr = Module._malloc(bytes.length);
+    Module.HEAPU8.set(bytes, ptr);
+    Module._emu_set_rom(slot.kind, ptr, bytes.length);
+    Module._free(ptr);
+  }
+}
+
+// ---- expansion-board configuration (persisted, default all installed) ----
+const HW_OPTIONS = [
+  { id: "hw-expram", kind: 0, key: "mzw_hw_expram" },
+  { id: "hw-expgram", kind: 1, key: "mzw_hw_expgram" },
+  { id: "hw-mz1m10", kind: 2, key: "mzw_hw_mz1m10" },
+];
+function applyHwOptionsToMachine() {
+  if (!Module) return;
+  for (const o of HW_OPTIONS) {
+    Module._emu_set_hw_option(o.kind, document.getElementById(o.id).checked ? 1 : 0);
+  }
+}
+for (const o of HW_OPTIONS) {
+  const el = document.getElementById(o.id);
+  el.checked = localStorage.getItem(o.key) !== "0"; // default: installed
+  el.addEventListener("change", () => {
+    localStorage.setItem(o.key, el.checked ? "1" : "0");
+    applyHwOptionsToMachine(); // RAM/GRAM changes settle at the next RESET
+  });
+}
+
+const realIplEl = document.getElementById("real-ipl-mode");
+realIplEl.checked = localStorage.getItem("mzw_real_ipl") === "1";
+realIplEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_real_ipl", realIplEl.checked ? "1" : "0");
+});
+
+async function refreshRomSlots() {
+  const box = document.getElementById("rom-slots");
+  box.innerHTML = "";
+  for (const slot of ROM_KINDS) {
+    const saved = await loadRomFromStore(slot.key);
+    const row = document.createElement("div");
+    row.className = "rom-slot";
+    const state = saved
+      ? `登録済: ${saved.name} (${(saved.buffer.byteLength / 1024) | 0}KB)`
+      : "未登録";
+    row.innerHTML =
+      `<span class="rname">${slot.label}</span>` +
+      `<span class="rstate">${state}</span>` +
+      `<button class="insbtn" data-act="reg">登録</button>` +
+      `<button class="insbtn" data-act="del">消去</button>` +
+      `<span class="fine">${slot.note}</span>`;
+    row.querySelector('[data-act="reg"]').addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await saveRomToStore(slot.key, file.name, bytes);
+        if (Module) {
+          const ptr = Module._malloc(bytes.length);
+          Module.HEAPU8.set(bytes, ptr);
+          Module._emu_set_rom(slot.kind, ptr, bytes.length);
+          Module._free(ptr);
+        }
+        refreshRomSlots();
+      };
+      input.click();
+    });
+    row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      await clearRomStore(slot.key);
+      refreshRomSlots();
+    });
+    box.appendChild(row);
+  }
+}
+refreshRomSlots();
 
 function refreshDriveUI(drive) {
   const d = drives[drive];
@@ -167,14 +284,18 @@ function restartAudio() {
 }
 
 function coldBoot() {
-  if (!Module || !drives[0]) return;
-  if (!pushVolume(0)) return;
+  if (!Module) return;
+  const wantRealIpl = realIplEl.checked && Module._emu_has_ipl();
+  if (!drives[0] && !wantRealIpl) return;
+  if (drives[0]) pushVolume(0);
   if (drives[1]) pushVolume(1);
-  if (!Module._emu_boot()) {
+  const ok = wantRealIpl ? Module._emu_boot_real_ipl()
+                         : (drives[0] ? Module._emu_boot() : 0);
+  if (!ok) {
     statusEl.textContent = "NOT A BOOTABLE DISK";
     return;
   }
-  statusEl.textContent = "RUNNING";
+  statusEl.textContent = wantRealIpl ? "RUNNING (REAL IPL)" : "RUNNING";
   restartAudio();
   if (!running) {
     running = true;
@@ -220,6 +341,8 @@ async function powerOn() {
 
   Module = await createMZ2500();
   Module._emu_init(audioCtx.sampleRate);
+  applyHwOptionsToMachine();
+  await applyRomsToMachine();
 
   // restore disks saved in this browser (IndexedDB); FD1 boots in place of
   // the bundled demo, FD2 is remounted alongside
@@ -414,3 +537,58 @@ wrap.addEventListener("drop", async (e) => {
 });
 
 document.getElementById("power").addEventListener("click", powerOn);
+
+// ---- debug panel ----------------------------------------------------------
+const debugToggle = document.getElementById("debug-toggle");
+const debugPanel = document.getElementById("debug-panel");
+const debugText = document.getElementById("debug-text");
+const debugWatch = document.getElementById("debug-watch");
+const debugWatchOut = document.getElementById("debug-watch-out");
+
+let debugVisible = localStorage.getItem("mzw_debug") === "1";
+debugPanel.hidden = !debugVisible;
+debugToggle.classList.toggle("active", debugVisible);
+debugWatch.value = localStorage.getItem("mzw_watch") || "";
+
+debugToggle.addEventListener("click", () => {
+  debugVisible = !debugVisible;
+  debugPanel.hidden = !debugVisible;
+  debugToggle.classList.toggle("active", debugVisible);
+  localStorage.setItem("mzw_debug", debugVisible ? "1" : "0");
+});
+debugWatch.addEventListener("change", () => {
+  localStorage.setItem("mzw_watch", debugWatch.value);
+});
+
+const hex2 = (v) => v.toString(16).toUpperCase().padStart(2, "0");
+const hex4 = (v) => v.toString(16).toUpperCase().padStart(4, "0");
+
+setInterval(() => {
+  if (!debugVisible || !Module || !running) return;
+  try {
+    const j = JSON.parse(Module.UTF8ToString(Module._emu_debug_json()));
+    const c = j.cpu;
+    debugText.textContent =
+      `frame ${j.frames}  cyc ${j.cycles}\n` +
+      `CPU  PC=${hex4(c.pc)} SP=${hex4(c.sp)} A=${hex2(c.a)} ` +
+      `BC=${hex4(c.bc)} DE=${hex4(c.de)} HL=${hex4(c.hl)}  ` +
+      `IM${c.im} IFF${c.iff1}${c.halted ? " HALT" : ""}\n` +
+      `BANK ${j.bank.map(hex2).join(" ")}   TEXT ${j.text80 ? 80 : 40}col  ` +
+      `KANJI ${hex2(j.kanji)}  IPL-ROM ${j.ipl_rom ? "loaded" : "-"}\n` +
+      `GDE  mode=${hex2(j.gde.mode)} SAD0=${hex4(j.gde.sad0)} HDSC=${j.gde.hdsc}\n` +
+      `FDC  ${j.fdc.motor ? "MOTOR" : "idle"} drv${j.fdc.drive} cyl${j.fdc.cyl} ` +
+      `reads=${j.fdc.reads} seeks=${j.fdc.seeks}\n` +
+      `INT  sel=${hex2(j.int.select)} vec=${hex2(j.int.vector)} ` +
+      `PIT=${j.int.pit_reload}${j.int.pit_on ? " on" : " off"}`;
+    const parts = [];
+    for (const tok of debugWatch.value.split(",")) {
+      const t = tok.trim();
+      if (!t) continue;
+      const addr = parseInt(t, 16);
+      if (!isNaN(addr)) parts.push(`${hex4(addr & 0xffff)}=${hex2(Module._emu_read_mem(addr & 0xffff))}`);
+    }
+    debugWatchOut.textContent = parts.join("  ");
+  } catch (e) {
+    debugText.textContent = String(e);
+  }
+}, 250);

@@ -54,13 +54,42 @@ public:
 
     void set_kanji_bank(uint8_t v) { kanji_bank_ = v; }
     uint8_t kanji_bank() const { return kanji_bank_; }
+    void set_dict_bank(uint8_t v) { dict_bank_ = v; }
+
+    // User-provided ROM images (never bundled; the owner supplies files).
+    // kind: 0 = IPL (32KB -> banks 34h-37h), 2 = kanji (bank 39h window
+    // paged by CFh), 3 = dictionary (bank 3Ah window paged by CEh).
+    void load_ipl_rom(const uint8_t* data, size_t size);
+    void load_kanji_rom(const uint8_t* data, size_t size) { kanji_rom_.assign(data, data + size); }
+    void load_dict_rom(const uint8_t* data, size_t size) { dict_rom_.assign(data, data + size); }
+    bool has_ipl_rom() const { return ipl_rom_loaded_; }
+
+    // Expansion hardware presence (real machines shipped without these):
+    // expansion RAM = banks 10h-1Fh (the 128KB->256KB upgrade), expansion
+    // GRAM = the second graphics screen (odd banks 21/23/25/27h). Absent
+    // banks read FFh and swallow writes, like empty sockets.
+    void set_expansion_ram(bool on) { expansion_ram_ = on; }
+    void set_expansion_gram(bool on) { expansion_gram_ = on; }
 
 private:
     std::vector<uint8_t> phys_;
+    std::vector<uint8_t> kanji_rom_;
+    std::vector<uint8_t> dict_rom_;
     uint8_t map_[8] = {0, 1, 2, 3, 4, 5, 6, 7};
     uint8_t selector_ = 0;
     uint8_t kanji_bank_ = 0;
+    uint8_t dict_bank_ = 0;
+    bool ipl_rom_loaded_ = false;
+    bool expansion_ram_ = true;
+    bool expansion_gram_ = true;
     bool warned_rom_bank_[NUM_BANKS] = {};
+
+    bool bank_absent(int bank) const {
+        if (!expansion_ram_ && bank >= 0x10 && bank <= 0x1F) return true;
+        if (!expansion_gram_ && (bank == 0x21 || bank == 0x23 || bank == 0x25 || bank == 0x27))
+            return true;
+        return false;
+    }
 };
 
 } // namespace mz

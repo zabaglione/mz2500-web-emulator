@@ -91,4 +91,44 @@ bool Mz2500::boot_from_disk() {
     return true;
 }
 
+bool Mz2500::boot_with_real_ipl() {
+    if (!mem_.has_ipl_rom()) {
+        std::fprintf(stderr, "[ipl] no IPL ROM loaded\n");
+        return false;
+    }
+
+    mem_.clear(); // RAM/VRAM/PCG zero; the ROM banks survive
+    fdc_.reset();
+    opn_.reset();
+    pit_counting_ = false;
+    pit_write_phase_ = 0;
+    pit_int_pending_ = false;
+    pio_a_ = 0;
+    joy_mask_ = 0;
+    std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
+    std::memset(gde_regs_, 0, sizeof(gde_regs_));
+    std::memset(palette_, 0, sizeof(palette_));
+    std::memset(opn_regs_, 0, sizeof(opn_regs_));
+    int_select_ = 0;
+    mem_.set_kanji_bank(0);
+
+    // hardware reset bank map: IPL ROM at 0000-7FFF, RAM 04-07 above
+    static const uint8_t reset_map[8] = {0x34, 0x35, 0x36, 0x37, 0x04, 0x05, 0x06, 0x07};
+    for (int block = 0; block < 8; block++) mem_.set_map(block, reset_map[block]);
+
+    z80_init(&cpu_);
+    cpu_.read_byte = cb_read;
+    cpu_.write_byte = cb_write;
+    cpu_.port_in = cb_in;
+    cpu_.port_out = cb_out;
+    cpu_.userdata = this;
+    cpu_.pc = 0x0000;
+    frame_origin_ = 0;
+    frames_ = 0;
+    idle_frames_remaining_ = 0; // the real firmware takes its real time
+
+    if (trace_boot_) std::fprintf(stderr, "[ipl] real IPL boot, PC=0000h\n");
+    return true;
+}
+
 } // namespace mz

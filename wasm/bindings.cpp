@@ -72,4 +72,40 @@ EMSCRIPTEN_KEEPALIVE int emu_fdd_lamps() {
     return g_machine ? g_machine->fdc().lamp_mask() : 0;
 }
 
+// ---- user ROM slots (files stay in the browser; never bundled) ----------
+EMSCRIPTEN_KEEPALIVE int emu_set_rom(int kind, const uint8_t* data, int size) {
+    if (!g_machine || size <= 0) return 0;
+    g_machine->set_rom(kind, data, (size_t)size);
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE int emu_has_ipl() {
+    return (g_machine && g_machine->has_ipl_rom()) ? 1 : 0;
+}
+
+// experimental: cold boot through the user-provided IPL ROM
+EMSCRIPTEN_KEEPALIVE int emu_boot_real_ipl() {
+    return (g_machine && g_machine->boot_with_real_ipl()) ? 1 : 0;
+}
+
+// expansion boards: kind 0=exp RAM, 1=exp GRAM, 2=MZ-1M10 palette
+EMSCRIPTEN_KEEPALIVE void emu_set_hw_option(int kind, int on) {
+    if (g_machine) g_machine->set_hw_option(kind, on != 0);
+}
+
+// ---- debug panel ---------------------------------------------------------
+namespace {
+char g_debug[1024];
+}
+
+EMSCRIPTEN_KEEPALIVE const char* emu_debug_json() {
+    if (!g_machine) return "";
+    g_machine->debug_json(g_debug, sizeof(g_debug));
+    return g_debug;
+}
+
+EMSCRIPTEN_KEEPALIVE int emu_read_mem(int addr) {
+    return g_machine ? g_machine->read_memory((uint16_t)addr) : 0;
+}
+
 } // extern "C"

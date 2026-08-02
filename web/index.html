@@ -44,7 +44,31 @@
     <span id="status">POWER OFF</span>
     <span id="fps"></span>
     <span id="audio-stat"></span>
+    <button id="debug-toggle" title="デバッグ情報の表示/非表示">DEBUG</button>
   </div>
+  <div id="debug-panel" hidden>
+    <pre id="debug-text"></pre>
+    <div id="debug-watch-row">
+      <label>watch (hex,カンマ区切り): <input id="debug-watch" placeholder="E547,E55E" size="24"></label>
+      <span id="debug-watch-out"></span>
+    </div>
+  </div>
+  <details id="hw-config">
+    <summary>ハードウェア構成（拡張ボード）</summary>
+    <p class="fine">実機のオプションボード相当。変更は保存され、RAM/GRAMはRESET後に反映されます。
+      同梱デモは既定構成（すべてON）を前提としています。</p>
+    <label class="fine"><input type="checkbox" id="hw-expram" checked> 拡張RAM（128KB→256KB、バンク10h-1Fh）</label><br>
+    <label class="fine"><input type="checkbox" id="hw-expgram" checked> 拡張GRAM（グラフィック第2画面、バンク21/23/25/27h）</label><br>
+    <label class="fine"><input type="checkbox" id="hw-mz1m10" checked> MZ-1M10（4096色パレットボード、ポートAEh）</label>
+  </details>
+  <details id="rom-config">
+    <summary>ROM設定（上級者向け・任意）</summary>
+    <p class="fine">実機からご自身で吸い出した ROM を登録できます。ファイルは<strong>このブラウザ内にのみ保存</strong>され、
+      どこにも送信されません。ROM が無くても同梱ゲームは完全動作します。</p>
+    <div id="rom-slots"></div>
+    <label class="fine"><input type="checkbox" id="real-ipl-mode">
+      実IPLで起動する（実験的: 現状ファームウェアは初期化途中で停止します。デバッグパネルでの調査用）</label>
+  </details>
   <section class="help">
     <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ ・ ゲームパッド対応</p>
     <p>画面へ D88 をドロップ = FD1 に入れて起動（IPLPRO ブートのみ）。

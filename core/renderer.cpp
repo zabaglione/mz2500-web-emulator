@@ -32,7 +32,7 @@ void Mz2500::render(uint8_t* rgba) const {
     // --- resolve the 16-colour output palette -------------------------------
     // OPN GPIO port A (register 0Eh) bit2: 0 selects the MZ-1M10 RGB444
     // palette, 1 the digital palette (used during FDC access windows).
-    const bool rgb444 = (opn_regs_[0x0E] & 0x04) == 0;
+    const bool rgb444 = mz1m10_present_ && (opn_regs_[0x0E] & 0x04) == 0;
     uint8_t pal_r[16], pal_g[16], pal_b[16];
     for (int i = 0; i < 16; i++) {
         if (rgb444) {

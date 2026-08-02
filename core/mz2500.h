@@ -40,6 +40,27 @@ public:
     // behind. Implemented in core/dummy_ipl.cpp.
     bool boot_from_disk();
 
+    // User-provided ROM images (kind: 0=ipl, 1=cg, 2=kanji, 3=dict). Never
+    // bundled; the owner supplies the files at runtime.
+    void set_rom(int kind, const uint8_t* data, size_t size);
+
+    // Expansion-board configuration (kind: 0=expansion RAM 256KB,
+    // 1=expansion GRAM second screen, 2=MZ-1M10 4096-colour palette board).
+    // Takes effect immediately; RAM/GRAM changes want a RESET to be sane.
+    void set_hw_option(int kind, bool on) {
+        switch (kind) {
+        case 0: mem_.set_expansion_ram(on); break;
+        case 1: mem_.set_expansion_gram(on); break;
+        case 2: mz1m10_present_ = on; break;
+        }
+    }
+    bool has_ipl_rom() const { return mem_.has_ipl_rom(); }
+
+    // Authentic cold boot through a user-provided IPL ROM: reset bank map
+    // {34h-37h, 04-07}, PC=0000h. Experimental - exercises whatever hardware
+    // the firmware touches. Implemented in core/dummy_ipl.cpp.
+    bool boot_with_real_ipl();
+
     void run_frame();
 
     // Compose the current screen into a 640x400 RGBA buffer (renderer.cpp).
@@ -75,6 +96,10 @@ public:
     void poke_memory(uint16_t addr, uint8_t value) { mem_.write(addr, value); }
 
     OpnYm2203& opn() { return opn_; }
+
+    // Machine state snapshot as JSON (debug panel / future tooling).
+    // Returns the number of bytes written (excluding the terminator).
+    size_t debug_json(char* buf, size_t cap);
 
 private:
     static uint8_t cb_read(void* ud, uint16_t addr);
@@ -118,6 +143,9 @@ private:
     bool pit_counting_ = false;
     uint64_t pit_next_fire_ = 0;
     uint8_t pio_a_ = 0;           // port E8h latch
+    uint8_t bank_mode_ = 0;       // port B7h latch
+    uint8_t ppi_[3] = {};         // 8255 A/B/C latches (E0h-E2h)
+    bool mz1m10_present_ = true;  // 4096-colour palette board option
     uint8_t joy_enable_ = 0;      // port EFh
     uint8_t key_rows_[16] = {};   // pressed bits per matrix row
     uint8_t joy_mask_ = 0;        // pressed joystick bits
