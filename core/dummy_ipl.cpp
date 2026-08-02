@@ -21,13 +21,14 @@
 namespace mz {
 
 bool Mz2500::boot_from_disk() {
-    if (!disk_.loaded()) {
+    D88Disk& boot_disk = disks_[0]; // the IPL boots from drive FD1
+    if (!boot_disk.loaded()) {
         std::fprintf(stderr, "[ipl] no disk mounted\n");
         return false;
     }
 
     uint8_t header[D88Disk::SECTOR_SIZE];
-    if (!disk_.read_decoded(16, header)) {
+    if (!boot_disk.read_decoded(16, header)) {
         std::fprintf(stderr, "[ipl] cannot read boot header sector (LBA 16)\n");
         return false;
     }
@@ -38,14 +39,24 @@ bool Mz2500::boot_from_disk() {
 
     mem_.clear(); // main RAM, VRAM, PCG all zero
     fdc_.reset();
+    opn_.reset();
+    pit_counting_ = false;
+    pit_write_phase_ = 0;
+    pit_int_pending_ = false;
+    pio_a_ = 0;
+    joy_mask_ = 0;
+    std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
+    std::memset(gde_regs_, 0, sizeof(gde_regs_));
+    std::memset(palette_, 0, sizeof(palette_));
+    std::memset(opn_regs_, 0, sizeof(opn_regs_));
 
     const uint8_t payload_bank = header[0x20] & 0x3F;
     uint8_t* dest = mem_.bank_ptr(payload_bank);
     for (int i = 0; i < 16; i++) {
-        if (!disk_.read_decoded(i, dest + i * D88Disk::SECTOR_SIZE)) return false;
+        if (!boot_disk.read_decoded(i, dest + i * D88Disk::SECTOR_SIZE)) return false;
     }
     for (int i = 0; i < 16; i++) {
-        if (!disk_.read_decoded(32 + i, dest + (16 + i) * D88Disk::SECTOR_SIZE)) return false;
+        if (!boot_disk.read_decoded(32 + i, dest + (16 + i) * D88Disk::SECTOR_SIZE)) return false;
     }
 
     for (int block = 0; block < 7; block++) mem_.set_map(block, header[0x30 + block]);

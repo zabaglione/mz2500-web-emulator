@@ -22,19 +22,17 @@ EMSCRIPTEN_KEEPALIVE int emu_init(int audio_rate) {
     return 1;
 }
 
-// data is copied; returns 1 when the disk parses and the dummy IPL boots it
-EMSCRIPTEN_KEEPALIVE int emu_load_disk(const uint8_t* data, int size) {
+// Hot-insert a disk into drive 0 or 1 (no reset - mid-game swaps work).
+// data is copied; returns 1 when the image parses.
+EMSCRIPTEN_KEEPALIVE int emu_insert_disk(int drive, const uint8_t* data, int size) {
     if (!g_machine || size <= 0) return 0;
     std::vector<uint8_t> bytes(data, data + size);
-    mz::D88Disk probe;
-    if (!probe.load(bytes)) return 0;
-    // reuse insert path via a fresh machine to keep state clean
-    const uint32_t rate = g_machine->opn().output_rate();
-    delete g_machine;
-    g_machine = new mz::Mz2500();
-    g_machine->opn().set_output_rate(rate);
-    if (!g_machine->insert_disk_bytes(std::move(bytes))) return 0;
-    return g_machine->boot_from_disk() ? 1 : 0;
+    return g_machine->insert_disk_bytes(drive, std::move(bytes)) ? 1 : 0;
+}
+
+// Cold boot from the disk in drive 0 (the dummy IPL path)
+EMSCRIPTEN_KEEPALIVE int emu_boot() {
+    return (g_machine && g_machine->boot_from_disk()) ? 1 : 0;
 }
 
 EMSCRIPTEN_KEEPALIVE void emu_run_frame() {
@@ -68,9 +66,10 @@ EMSCRIPTEN_KEEPALIVE int emu_frames() {
     return g_machine ? (int)g_machine->frames() : 0;
 }
 
-// FDD access lamp: the drive-select/motor line, like the LED on a real drive
-EMSCRIPTEN_KEEPALIVE int emu_fdd_motor() {
-    return (g_machine && g_machine->fdc().motor_on()) ? 1 : 0;
+// FDD access lamps: bit n = drive n LED (drive-select + motor line, like
+// the LED on a real drive)
+EMSCRIPTEN_KEEPALIVE int emu_fdd_lamps() {
+    return g_machine ? g_machine->fdc().lamp_mask() : 0;
 }
 
 } // extern "C"

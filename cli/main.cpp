@@ -132,7 +132,8 @@ void usage() {
     std::printf(
         "mz2500w-cli - headless MZ-2500 web emulator core\n"
         "  --selftest            run P0 self test (Z80 + YM2203 + WAV)\n"
-        "  --disk-a PATH         mount a D88 image in drive 0 and boot it\n"
+        "  --disk-a PATH         mount a D88 image in drive 0 (FD1) and boot it\n"
+        "  --disk-b PATH         mount a D88 image in drive 1 (FD2)\n"
         "  --frames N            run N emulated frames (default 600)\n"
         "  --trace-boot          log dummy-IPL and boot progress\n"
         "  --cpu-report          print CPU state at exit\n"
@@ -153,6 +154,7 @@ void usage() {
 
 int main(int argc, char** argv) {
     std::string disk_a;
+    std::string disk_b;
     long frames = 600;
     bool trace_boot = false;
     bool cpu_report = false;
@@ -193,6 +195,10 @@ int main(int argc, char** argv) {
             const char* v = value();
             if (!v) { usage(); return 2; }
             disk_a = v;
+        } else if (arg == "--disk-b") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            disk_b = v;
         } else if (arg == "--frames") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -282,7 +288,8 @@ int main(int argc, char** argv) {
     if (boot_delay >= 0) machine.set_boot_delay_frames(static_cast<int>(boot_delay));
     if (fdc_latency_us >= 0) machine.fdc().set_read_latency_us(static_cast<uint32_t>(fdc_latency_us));
     if (fdc_step_us >= 0) machine.fdc().set_step_time_us(static_cast<uint32_t>(fdc_step_us));
-    if (!machine.insert_disk(disk_a)) return 1;
+    if (!machine.insert_disk(0, disk_a)) return 1;
+    if (!disk_b.empty() && !machine.insert_disk(1, disk_b)) return 1;
     if (!machine.boot_from_disk()) return 1;
 
     std::vector<int> trace_last(trace_addrs.size(), -1);

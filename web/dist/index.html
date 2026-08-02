@@ -21,15 +21,33 @@
       <p class="hint">NEKO CAN RUN デモ版（WORLD 1）を起動します（音が出ます）</p>
     </div>
   </div>
+  <div id="drivebay">
+    <span class="drive">
+      <span class="lamp" id="lamp0">&#9679;</span><span class="dlabel">FD1</span>
+      <span class="dname" id="dname0">-</span>
+      <select id="vol0" class="volsel" hidden></select>
+      <button class="insbtn" id="ins0" title="ディスク入替（リセットしません）">入替</button>
+    </span>
+    <span class="drive">
+      <span class="lamp" id="lamp1">&#9679;</span><span class="dlabel">FD2</span>
+      <span class="dname" id="dname1">(empty)</span>
+      <select id="vol1" class="volsel" hidden></select>
+      <button class="insbtn" id="ins1" title="ディスク入替（リセットしません）">入替</button>
+    </span>
+    <button id="reset-btn" title="FD1のディスクから再起動">RESET</button>
+    <input type="file" id="file0" accept=".d88" hidden>
+    <input type="file" id="file1" accept=".d88" hidden>
+  </div>
   <div id="statusbar">
     <span id="status">POWER OFF</span>
-    <span id="fdd">&#9679; FDD</span>
     <span id="fps"></span>
     <span id="audio-stat"></span>
   </div>
   <section class="help">
     <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ ・ ゲームパッド対応</p>
-    <p>手持ちの MZ-2500 用 D88 をここへドラッグ＆ドロップしても起動できます（IPLPRO ブートのみ）。</p>
+    <p>画面へ D88 をドロップ = FD1 に入れて起動（IPLPRO ブートのみ）。
+      各ドライブの「入替」やドライブ枠へのドロップ = リセットせずディスク交換。
+      複数ボリューム入り D88 は自動分割され、ドライブ横のプルダウンで枚を切り替えられます（2枚組対応）。</p>
     <p>同梱の <strong>NEKO CAN RUN デモ版</strong>（WORLD 1）は動作検証を兼ねたサンプルです。
       デモ版・製品版（有償・全4ワールド）は
       <a href="https://zabaglione.booth.pm/items/8672891" target="_blank" rel="noopener">BOOTH（ザバイオーネ研究室）</a>

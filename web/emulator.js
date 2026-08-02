@@ -3,6 +3,11 @@
 // so audible latency stays pinned near TARGET_MS instead of accumulating.
 // (The worklet additionally hard-caps its queue and drops the oldest
 // samples, so delay is bounded even if this estimate ever drifts.)
+//
+// Two floppy drives are exposed (FD1/FD2, matching the real cabinet):
+// per-drive hot insert never resets the machine, RESET reboots from FD1,
+// and concatenated multi-volume D88 files are split into a per-drive
+// volume selector so multi-disk software can swap sides mid-game.
 "use strict";
 
 const TARGET_MS = 50;         // audio depth the pacing loop maintains
@@ -31,7 +36,10 @@ const overlay = document.getElementById("overlay");
 const statusEl = document.getElementById("status");
 const fpsEl = document.getElementById("fps");
 const audioStatEl = document.getElementById("audio-stat");
-const fddEl = document.getElementById("fdd");
+const lampEls = [document.getElementById("lamp0"), document.getElementById("lamp1")];
+const dnameEls = [document.getElementById("dname0"), document.getElementById("dname1")];
+const volEls = [document.getElementById("vol0"), document.getElementById("vol1")];
+const fileEls = [document.getElementById("file0"), document.getElementById("file1")];
 
 let Module = null;
 let audioCtx = null;
@@ -48,6 +56,110 @@ let lastReportedQueued = 0;
 
 let framesShown = 0;
 let fpsWindowStart = 0;
+
+// ---- disks ----------------------------------------------------------------
+// A .d88 file may hold several concatenated volumes (multi-disk releases).
+function d88Volumes(bytes) {
+  const volumes = [];
+  let off = 0;
+  while (off + 0x2b0 <= bytes.length && volumes.length < 16) {
+    const size = bytes[off + 0x1c] | (bytes[off + 0x1d] << 8) |
+                 (bytes[off + 0x1e] << 16) | (bytes[off + 0x1f] << 24);
+    if (size < 0x2b0 || off + size > bytes.length) break;
+    let title = "";
+    for (let i = 0; i < 17; i++) {
+      const c = bytes[off + i];
+      if (c >= 0x20 && c < 0x7f) title += String.fromCharCode(c);
+      else if (c === 0) break;
+    }
+    volumes.push({ title: title.trim(), bytes: bytes.slice(off, off + size) });
+    off += size;
+  }
+  return volumes;
+}
+
+// drive state: null or { name, volumes, current }
+const drives = [null, null];
+
+function refreshDriveUI(drive) {
+  const d = drives[drive];
+  if (!d) {
+    dnameEls[drive].textContent = "(empty)";
+    volEls[drive].hidden = true;
+    return;
+  }
+  const multi = d.volumes.length > 1;
+  dnameEls[drive].textContent = multi ? d.name : (d.volumes[0].title || d.name);
+  volEls[drive].hidden = !multi;
+  if (multi) {
+    volEls[drive].innerHTML = "";
+    d.volumes.forEach((v, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = `${i + 1}: ${v.title || "disk " + (i + 1)}`;
+      volEls[drive].appendChild(o);
+    });
+    volEls[drive].value = d.current;
+  }
+}
+
+function pushVolume(drive) {
+  const d = drives[drive];
+  if (!d || !Module) return false;
+  const bytes = d.volumes[d.current].bytes;
+  const ptr = Module._malloc(bytes.length);
+  Module.HEAPU8.set(bytes, ptr);
+  const ok = Module._emu_insert_disk(drive, ptr, bytes.length);
+  Module._free(ptr);
+  refreshDriveUI(drive);
+  return ok !== 0;
+}
+
+// Hot swap (no reset). Returns true when the image parsed.
+function insertFile(drive, name, bytes) {
+  const volumes = d88Volumes(bytes);
+  if (volumes.length === 0) {
+    statusEl.textContent = "NOT A D88 IMAGE";
+    return false;
+  }
+  drives[drive] = { name, volumes, current: 0 };
+  return pushVolume(drive);
+}
+
+function restartAudio() {
+  workletNode.port.postMessage({ flush: 1 });
+  produced = 0;
+  audioT0 = audioCtx.currentTime;
+}
+
+function coldBoot() {
+  if (!Module || !drives[0]) return;
+  if (!pushVolume(0)) return;
+  if (drives[1]) pushVolume(1);
+  if (!Module._emu_boot()) {
+    statusEl.textContent = "NOT A BOOTABLE DISK";
+    return;
+  }
+  statusEl.textContent = "RUNNING";
+  restartAudio();
+  if (!running) {
+    running = true;
+    fpsWindowStart = performance.now();
+    requestAnimationFrame(tick);
+  }
+}
+
+// canvas drop / initial load: mount into FD1 (volume 2 goes to FD2) and boot
+function bootFromFile(name, bytes) {
+  const volumes = d88Volumes(bytes);
+  if (volumes.length === 0) {
+    statusEl.textContent = "NOT A D88 IMAGE";
+    return;
+  }
+  drives[0] = { name, volumes, current: 0 };
+  if (volumes.length > 1) drives[1] = { name, volumes, current: 1 };
+  coldBoot();
+}
 
 async function powerOn() {
   overlay.classList.add("hidden");
@@ -75,27 +187,7 @@ async function powerOn() {
     statusEl.textContent = "DISK FETCH FAILED";
     return;
   }
-  bootDisk(new Uint8Array(await resp.arrayBuffer()));
-}
-
-function bootDisk(bytes) {
-  const ptr = Module._malloc(bytes.length);
-  Module.HEAPU8.set(bytes, ptr);
-  const ok = Module._emu_load_disk(ptr, bytes.length);
-  Module._free(ptr);
-  if (!ok) {
-    statusEl.textContent = "NOT A BOOTABLE DISK";
-    return;
-  }
-  statusEl.textContent = "RUNNING";
-  workletNode.port.postMessage({ flush: 1 });
-  produced = 0;
-  audioT0 = audioCtx.currentTime;
-  if (!running) {
-    running = true;
-    fpsWindowStart = performance.now();
-    requestAnimationFrame(tick);
-  }
+  bootFromFile("neko_can_run_demo.d88", new Uint8Array(await resp.arrayBuffer()));
 }
 
 function pumpAudio() {
@@ -139,7 +231,9 @@ function tick(now) {
     blit();
     framesShown += steps;
   }
-  fddEl.classList.toggle("on", Module._emu_fdd_motor() !== 0);
+  const lamps = Module._emu_fdd_lamps();
+  lampEls[0].classList.toggle("on", (lamps & 1) !== 0);
+  lampEls[1].classList.toggle("on", (lamps & 2) !== 0);
 
   if (now - fpsWindowStart > 1000) {
     const bufMs = (lastReportedQueued / rate * 1000) | 0;
@@ -199,7 +293,43 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// ---- drag & drop ----------------------------------------------------------
+// ---- drive bay ------------------------------------------------------------
+for (const drive of [0, 1]) {
+  document.getElementById("ins" + drive).addEventListener("click", () => {
+    if (Module) fileEls[drive].click();
+  });
+  fileEls[drive].addEventListener("change", async () => {
+    const file = fileEls[drive].files[0];
+    fileEls[drive].value = "";
+    if (!file || !Module) return;
+    insertFile(drive, file.name, new Uint8Array(await file.arrayBuffer()));
+  });
+  volEls[drive].addEventListener("change", () => {
+    const d = drives[drive];
+    if (!d) return;
+    d.current = parseInt(volEls[drive].value, 10) || 0;
+    pushVolume(drive); // hot swap to the chosen volume
+  });
+  const box = document.getElementById("ins" + drive).parentElement;
+  box.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    box.classList.add("dragover");
+  });
+  box.addEventListener("dragleave", () => box.classList.remove("dragover"));
+  box.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    box.classList.remove("dragover");
+    const file = e.dataTransfer.files[0];
+    if (!file || !Module) return;
+    insertFile(drive, file.name, new Uint8Array(await file.arrayBuffer()));
+  });
+}
+
+document.getElementById("reset-btn").addEventListener("click", () => coldBoot());
+
+// ---- canvas drag & drop: boot from FD1 ------------------------------------
 const wrap = document.getElementById("screen-wrap");
 wrap.addEventListener("dragover", (e) => {
   e.preventDefault();
@@ -211,7 +341,7 @@ wrap.addEventListener("drop", async (e) => {
   wrap.classList.remove("dragover");
   const file = e.dataTransfer.files[0];
   if (!file || !Module) return;
-  bootDisk(new Uint8Array(await file.arrayBuffer()));
+  bootFromFile(file.name, new Uint8Array(await file.arrayBuffer()));
 });
 
 document.getElementById("power").addEventListener("click", powerOn);

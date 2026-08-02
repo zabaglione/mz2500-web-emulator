@@ -26,8 +26,13 @@ public:
 
     Mz2500();
 
-    bool insert_disk(const std::string& path);
-    bool insert_disk_bytes(std::vector<uint8_t> bytes) { return disk_.load(std::move(bytes)); }
+    // Two floppy drives (FD1 = drive 0, FD2 = drive 1). Inserting is a hot
+    // swap: it never resets the machine, so mid-game disk changes work.
+    bool insert_disk(int drive, const std::string& path);
+    bool insert_disk_bytes(int drive, std::vector<uint8_t> bytes) {
+        return disks_[drive & 1].load(std::move(bytes));
+    }
+    bool insert_disk(const std::string& path) { return insert_disk(0, path); }
 
     // Native replacement for the IPL ROM boot sequence ("dummy IPL"):
     // interprets the IPLPRO header on the mounted disk and starts the CPU at
@@ -86,7 +91,7 @@ private:
 
     z80 cpu_{};
     BankedMemory mem_;
-    D88Disk disk_;
+    D88Disk disks_[FdcMb8877::NUM_DRIVES];
     FdcMb8877 fdc_;
     OpnYm2203 opn_;
 

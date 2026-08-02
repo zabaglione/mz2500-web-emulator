@@ -11,10 +11,12 @@ Mz2500::Mz2500() {
     cpu_.port_in = cb_in;
     cpu_.port_out = cb_out;
     cpu_.userdata = this;
-    fdc_.attach(&disk_);
+    for (int i = 0; i < FdcMb8877::NUM_DRIVES; i++) fdc_.attach(i, &disks_[i]);
 }
 
-bool Mz2500::insert_disk(const std::string& path) { return disk_.load_file(path); }
+bool Mz2500::insert_disk(int drive, const std::string& path) {
+    return disks_[drive & 1].load_file(path);
+}
 
 uint8_t Mz2500::cb_read(void* ud, uint16_t addr) {
     return static_cast<Mz2500*>(ud)->mem_.read(addr);
