@@ -74,7 +74,13 @@ uint8_t Mz2500::io_in(uint16_t port) {
     case 0xBD: // GDE status: bit0 = busy (hardware clear in progress)
         return cpu_.cyc < gde_busy_until_ ? 0x01 : 0x00;
     case 0xC8: return opn_.read_status(cpu_.cyc);
-    case 0xC9: return opn_.read_data();
+    case 0xC9: {
+        const uint8_t v = opn_.read_data();
+        if (trace_boot_)
+            std::fprintf(stderr, "[opn] read C9 addr=%02X -> %02X (pc=%04X)\n",
+                         opn_addr_, v, cpu_.pc);
+        return v;
+    }
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
         return static_cast<uint8_t>(~fdc_.read((port & 0xFF) - 0xD8, cpu_.cyc));
     case 0xE0:

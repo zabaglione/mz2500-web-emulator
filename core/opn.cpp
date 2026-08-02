@@ -68,7 +68,11 @@ uint8_t OpnYm2203::read_status(uint64_t now) {
     return chip_.read_status();
 }
 
-uint8_t OpnYm2203::read_data() { return chip_.read_data(); }
+uint8_t OpnYm2203::read_data() {
+    // register 0Fh = SSG port B: the sense lines live outside the chip
+    if (address_ == 0x0F) return port_b_input_;
+    return chip_.read_data();
+}
 
 void OpnYm2203::write_address(uint8_t value, uint64_t now) {
     flush_to(now);

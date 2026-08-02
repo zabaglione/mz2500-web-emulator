@@ -14,7 +14,19 @@ body {
   display: flex;
   justify-content: center;
 }
-main { max-width: 720px; padding: 16px; }
+main { max-width: 1320px; padding: 16px; }
+#layout {
+  display: grid;
+  grid-template-columns: 250px minmax(480px, 680px) minmax(280px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+#left-pane details { margin: 0 0 10px; }
+#right-pane { position: sticky; top: 12px; }
+@media (max-width: 1100px) {
+  #layout { grid-template-columns: 1fr; }
+  #right-pane { position: static; }
+}
 h1 { font-size: 20px; letter-spacing: 2px; color: var(--accent); }
 h1 .sub { color: var(--text); font-size: 14px; }
 #screen-wrap {
@@ -126,9 +138,10 @@ h1 .sub { color: var(--text); font-size: 14px; }
 #debug-watch-out { color: #e0d8a0; margin-left: 8px; }
 #rom-config, #hw-config { font-size: 12px; color: #9a9ab0; margin: 8px 0; }
 #rom-config summary, #hw-config summary { cursor: pointer; }
-.rom-slot { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
-.rom-slot .rname { width: 80px; color: var(--accent); }
-.rom-slot .rstate { width: 180px; }
+.rom-slot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; }
+.rom-slot .rname { color: var(--accent); }
+.rom-slot .rstate { flex-basis: 100%; word-break: break-all; }
+.rom-slot .fine { flex-basis: 100%; }
 .help { font-size: 12px; color: #9a9ab0; line-height: 1.6; }
 .help .fine { font-size: 10px; color: #667; }
 #screen-wrap.dragover { outline: 3px dashed var(--accent); }

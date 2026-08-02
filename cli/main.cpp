@@ -223,6 +223,7 @@ int main(int argc, char** argv) {
     long trace_trap = -1;
     bool dump_io = false;
     long ram_dump_addr = -1; unsigned ram_dump_len = 0;
+    long phys_dump_addr = -1; unsigned phys_dump_len = 0;
     long audio_start = 0, audio_end = -1;
     std::vector<uint16_t> memory_reports;
     std::vector<uint16_t> trace_addrs;
@@ -328,6 +329,12 @@ int main(int argc, char** argv) {
             rom_dir = v;
         } else if (arg == "--real-ipl") {
             real_ipl = true;
+        } else if (arg == "--phys-dump") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            unsigned a=0, l=0;
+            if (std::sscanf(v, "%x:%x", &a, &l) != 2) { usage(); return 2; }
+            phys_dump_addr = a; phys_dump_len = l;
         } else if (arg == "--ram-dump") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -473,6 +480,15 @@ int main(int argc, char** argv) {
     }
     for (uint16_t addr : memory_reports) {
         std::printf("memory[%04x]=%02x\n", addr, machine.read_memory(addr));
+    }
+    if (phys_dump_addr >= 0) {
+        // bank-map independent: reads the physical 512KB array directly
+        for (unsigned i = 0; i < phys_dump_len; i++) {
+            const unsigned off = (unsigned)phys_dump_addr + i;
+            if (i % 16 == 0) std::printf("\nphys %05x:", off);
+            std::printf(" %02x", machine.memory().bank_ptr((int)(off >> 13))[off & 0x1FFF]);
+        }
+        std::printf("\n");
     }
     if (ram_dump_addr >= 0) {
         for (unsigned i = 0; i < ram_dump_len; i++) {

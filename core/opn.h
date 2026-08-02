@@ -31,6 +31,12 @@ public:
 
     uint8_t read_status(uint64_t now);
     uint8_t read_data();
+
+    // SSG I/O port B (register 0Fh) carries the machine's boot-device sense
+    // lines. Measured on a real-ROM boot: 3Fh with a floppy interface
+    // present (bits 0-5 pulled high). The firmware reads it through its
+    // routine at 7EC1h and derives the boot source from bits 4-6.
+    void set_port_b_input(uint8_t value) { port_b_input_ = value; }
     void write_address(uint8_t value, uint64_t now);
     void write_data(uint8_t value, uint64_t now);
 
@@ -89,6 +95,7 @@ private:
     float fm_mix_ = 1.0f;
     float ssg_mix_ = 1.0f;
     float beeper_ = 0.0f;
+    uint8_t port_b_input_ = 0x3F;
     uint32_t fm_lpf_hz_ = 5000;
     Biquad fm_lp1_, fm_lp2_;
 
