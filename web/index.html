@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- the page is the version stamp for everything it loads, so it must never
+     be served from cache after a rebuild -->
+<meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>MZ-2500 Web Emulator - NEKO CAN RUN</title>
 <meta name="description" content="SHARP MZ-2500エミュレータ（ブラウザ版・実機ROM不要）。自作アクションゲーム NEKO CAN RUN をそのままプレイできます。">
 <meta property="og:title" content="MZ-2500 Web Emulator - NEKO CAN RUN">
@@ -13,7 +16,7 @@
 </head>
 <body>
 <main>
-  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span></h1>
+  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD __BUILD__</span></h1>
   <div id="layout">
   <aside id="left-pane">
   <details id="hw-config">
@@ -21,8 +24,41 @@
     <p class="fine">実機のオプションボード相当。変更は保存され、RAM/GRAMはRESET後に反映されます。
       同梱デモは既定構成（すべてON）を前提としています。</p>
     <label class="fine"><input type="checkbox" id="hw-expram" checked> 拡張RAM（128KB→256KB、バンク10h-1Fh）</label><br>
-    <label class="fine"><input type="checkbox" id="hw-expgram" checked> 拡張GRAM（グラフィック第2画面、バンク21/23/25/27h）</label><br>
+    <label class="fine"><input type="checkbox" id="hw-expgram" checked> 増設ビデオRAM MZ-1R27（GRAM 64KB→128KB、バンク28h-2Fh。640×400 16色に必要）</label><br>
     <label class="fine"><input type="checkbox" id="hw-mz1m10" checked> MZ-1M10（4096色パレットボード、ポートAEh）</label>
+  </details>
+  <details id="key-config">
+    <summary>キーボード</summary>
+    <p class="fine">テンキーで8方向移動するソフトを、テンキーの無いキーボードで遊ぶための補正です。
+      ドライブ横の「テンキー」ボタンで入切でき、設定は保存されます。</p>
+    <label class="fine"><input type="checkbox" id="key-tenkey">
+      カーソルキーをテンキー（2/4/6/8）として送る</label><br>
+    <label class="fine"><input type="checkbox" id="key-diag" checked>
+      斜めは 1/3/7/9 を1キーとして送る（切ると2キー同時押しのまま）</label><br>
+    <label class="fine"><input type="checkbox" id="key-both">
+      カーソルキーも同時に送る（両対応のソフト向け）</label>
+  </details>
+  <details id="mouse-config">
+    <summary>マウス</summary>
+    <p class="fine">画面をクリックすると捕捉します。Esc で解放（この Esc は MZ には送りません）。
+      <strong>捕捉中は Option（Alt）キーが MZ の ESC になります</strong>
+      （捕捉中はブラウザが Esc を横取りするため MZ に届かず、画面上のキーボードもクリックできないため）。<br>
+      MZ-1X10 は SIO チャンネルB につながり、OPN ポートA の b3 で切り替わります。<br>
+      左クリック＝MZ-1X10 のボタン1、右クリック＝ボタン2です（中央ボタンは未対応）。
+      捕捉中は右クリックしてもブラウザの右クリックメニューは出ません。</p>
+    <label class="fine">感度
+      <input type="range" id="mouse-sens" min="1" max="40" step="1" value="10">
+      <span id="mouse-sens-val">1.0</span>倍</label>
+  </details>
+  <details id="pad-config">
+    <summary>ゲームパッドのボタン割り当て</summary>
+    <p class="fine">実機のジョイスティックは2ボタン（トリガ1・トリガ2）です。どのパッドボタンを
+      どちらのトリガにするかを選べます。設定は保存されます。<br>
+      NEKO CAN RUN の初期設定はトリガ2 = ジャンプ、トリガ1 = ダッシュで、
+      タイトル画面の CONFIG で入れ替えられます。</p>
+    <label class="fine">トリガ1 <select id="pad-trig1"></select></label>
+    <label class="fine">トリガ2 <select id="pad-trig2"></select></label>
+    <button id="pad-reset" class="insbtn" type="button">既定に戻す</button>
   </details>
   <details id="rom-config">
     <summary>ROM設定（上級者向け・任意）</summary>
@@ -30,7 +66,8 @@
       どこにも送信されません。ROM が無くても同梱ゲームは完全動作します。</p>
     <div id="rom-slots"></div>
     <label class="fine"><input type="checkbox" id="real-ipl-mode">
-      実IPLで起動する（実験的: 現状ファームウェアは初期化途中で停止します。デバッグパネルでの調査用）</label>
+      実IPLで起動する（ipl.rom 登録時のみ。BASIC-M25 などの市販ディスクを起動できます。
+      文字表示には kanji.rom も登録してください）</label>
   </details>
   </aside>
   <div id="center-pane">
@@ -48,6 +85,10 @@
       <select id="vol0" class="volsel" hidden></select>
       <button class="insbtn" id="ins0" title="ディスク入替（リセットしません）">入替</button>
       <button class="insbtn" id="eject0" title="このブラウザに保存したディスクを消去（次回起動はデモに戻ります）">&#9167;</button>
+      <button class="insbtn" id="blank0" title="未フォーマットのブランクディスクを入れる">新規</button>
+      <button class="insbtn" id="save0" title="いま入っているディスクを.d88で保存">保存</button>
+      <button class="insbtn" id="wp0" type="button" aria-pressed="false"
+        title="ライトプロテクト（実機のタブ相当）">WP</button>
     </span>
     <span class="drive">
       <span class="lamp" id="lamp1">&#9679;</span><span class="dlabel">FD2</span>
@@ -55,11 +96,26 @@
       <select id="vol1" class="volsel" hidden></select>
       <button class="insbtn" id="ins1" title="ディスク入替（リセットしません）">入替</button>
       <button class="insbtn" id="eject1" title="このブラウザに保存したディスクを消去">&#9167;</button>
+      <button class="insbtn" id="blank1" title="未フォーマットのブランクディスクを入れる">新規</button>
+      <button class="insbtn" id="save1" title="いま入っているディスクを.d88で保存">保存</button>
+      <button class="insbtn" id="wp1" type="button" aria-pressed="false"
+        title="ライトプロテクト（実機のタブ相当）">WP</button>
     </span>
+    <button id="tenkey-btn" class="insbtn" type="button" aria-pressed="false"
+      title="カーソルキーをテンキーとして送る（設定は左の「キーボード」）">テンキー</button>
+    <button id="mouse-btn" class="insbtn" type="button" aria-pressed="false"
+      title="マウス捕捉の入切（画面クリックでも捕捉します）">マウス</button>
+    <button id="vkbd-btn" class="insbtn" type="button" aria-pressed="false"
+      title="画面上のキーボードを開閉（GRAPH・カナ・変換・HELP・COPYなど実機だけのキーを押せます）">キーボード</button>
     <button id="reset-btn" title="FD1のディスクから再起動">RESET</button>
-    <input type="file" id="file0" accept=".d88" hidden>
-    <input type="file" id="file1" accept=".d88" hidden>
+    <!-- offscreen rather than display:none: WebKit refuses to open the file
+         picker for an input that is not rendered -->
+    <input type="file" id="file0" accept=".d88" class="offscreen">
+    <input type="file" id="file1" accept=".d88" class="offscreen">
   </div>
+  <!-- filled in by emulator.js from the layout table, so the key caps and
+       their matrix positions live in one place -->
+  <section id="vkbd" hidden aria-label="MZ-2500 キーボード"></section>
   <div id="statusbar">
     <span id="status">POWER OFF</span>
     <span id="fps"></span>
@@ -67,7 +123,18 @@
     <button id="debug-toggle" title="デバッグ情報の表示/非表示">DEBUG</button>
   </div>
   <section class="help">
-    <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ ・ ゲームパッド対応</p>
+    <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ<br>
+      ゲームパッド: A / × = トリガ1 ・ B / ○ = トリガ2 ・ 十字キーまたは左スティック = 移動
+      （割り当ては左の「ゲームパッドのボタン割り当て」で変更できます）<br>
+      <span class="fine">NEKO CAN RUN の初期設定はトリガ2 = ジャンプ、トリガ1 = ダッシュです。
+        タイトル画面の CONFIG で入れ替えられます。</span></p>
+    <p>ドライブ横の「キーボード」ボタンで<strong>画面上のキーボード</strong>を開閉できます（実機と同じキー配列）。
+      GRAPH・カナ・LOCK・変換・無変換・HELP・COPY・HOME/CLR・BREAK・アルゴ、テンキーの <code>*</code> <code>/</code> など、
+      パソコンのキーボードに無いキーはここから押せます。開閉の状態は保存されます。<br>
+      <strong>SHIFT・CTRL・GRAPH・カナ・LOCK は押すと固定</strong>され（もう一度押すと戻ります）、
+      片手・マウスだけでも SHIFT + BREAK や GRAPH + キーのような同時押しができます。
+      それ以外のキーは押している間だけ入り、押したまま指やポインタが外れると離した扱いになります。
+      画面上のキーボードとパソコンのキーボードは同時に使えます。</p>
     <p>画面へ D88 をドロップ = FD1 に入れて起動（IPLPRO ブートのみ）。
       各ドライブの「入替」やドライブ枠へのドロップ = リセットせずディスク交換。
       複数ボリューム入り D88 は自動分割され、ドライブ横のプルダウンで枚を切り替えられます（2枚組対応）。
@@ -76,6 +143,9 @@
       デモ版・製品版（有償・全4ワールド）は
       <a href="https://zabaglione.booth.pm/items/8672891" target="_blank" rel="noopener">BOOTH（ザバイオーネ研究室）</a>
       にて配布中。</p>
+    <p class="fine"><strong>動作について：</strong>市販ソフトやフリーソフトで動作検証を行っていますが、
+      <strong>すべてのソフトウェアの動作を保証するものではありません。</strong>
+      未実装の周辺機器や、実機と挙動が異なる箇所が残っています。動かないソフトがあってもご容赦ください。</p>
     <p class="fine">本体ROM不使用（ブートはネイティブ代替実装）。ゲーム: (C) 2026 ZABAGLIONE PROJECT /
       Emulator: MIT License, CPU core: superzazu/z80 (MIT), FM: ymfm (BSD-3-Clause).
       挙動検証は EmuZ-2500 (Common Source Code Project) をブラックボックスオラクルとして実施。</p>

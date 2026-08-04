@@ -61,13 +61,18 @@ public:
     // paged by CFh), 3 = dictionary (bank 3Ah window paged by CEh).
     void load_ipl_rom(const uint8_t* data, size_t size);
     void load_kanji_rom(const uint8_t* data, size_t size) { kanji_rom_.assign(data, data + size); }
+    const std::vector<uint8_t>& kanji_rom() const { return kanji_rom_; }
     void load_dict_rom(const uint8_t* data, size_t size) { dict_rom_.assign(data, data + size); }
     bool has_ipl_rom() const { return ipl_rom_loaded_; }
 
     // Expansion hardware presence (real machines shipped without these):
     // expansion RAM = banks 10h-1Fh (the 128KB->256KB upgrade), expansion
-    // GRAM = the second graphics screen (odd banks 21/23/25/27h). Absent
-    // banks read FFh and swallow writes, like empty sockets.
+    // GRAM = the MZ-1R27 board, banks 28h-2Fh, which doubles the graphics
+    // V-RAM to 128KB and is what 640x400x16 needs. Banks 20h-27h are the
+    // standard 64KB and are always present - Oh!MZ's bank table names the
+    // 30h/31h read-modify-write window "standard" and 32h/33h, the window
+    // onto 28h-2Fh, "option". Absent banks read FFh and swallow writes,
+    // like empty sockets.
     void set_expansion_ram(bool on) { expansion_ram_ = on; }
     void set_expansion_gram(bool on) { expansion_gram_ = on; }
 
@@ -86,8 +91,7 @@ private:
 
     bool bank_absent(int bank) const {
         if (!expansion_ram_ && bank >= 0x10 && bank <= 0x1F) return true;
-        if (!expansion_gram_ && (bank == 0x21 || bank == 0x23 || bank == 0x25 || bank == 0x27))
-            return true;
+        if (!expansion_gram_ && bank >= 0x28 && bank <= 0x2F) return true;
         return false;
     }
 };

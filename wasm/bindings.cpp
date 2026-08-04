@@ -30,6 +30,58 @@ EMSCRIPTEN_KEEPALIVE int emu_insert_disk(int drive, const uint8_t* data, int siz
     return g_machine->insert_disk_bytes(drive, std::move(bytes)) ? 1 : 0;
 }
 
+// Put an unformatted disk in a drive: the write tests' target.
+EMSCRIPTEN_KEEPALIVE int emu_insert_blank_disk(int drive) {
+    if (!g_machine) return 0;
+    return g_machine->insert_blank_disk(drive) ? 1 : 0;
+}
+
+// ---- written disks: hand the image back for the browser to keep ---------
+namespace {
+std::vector<uint8_t> g_disk_out;
+}
+
+EMSCRIPTEN_KEEPALIVE int emu_disk_dirty(int drive) {
+    return (g_machine && g_machine->disk_dirty(drive)) ? 1 : 0;
+}
+
+// Snapshot a drive's image into a buffer emu_disk_data() then points at,
+// and report how many bytes it holds. Two calls rather than one because the
+// JS side needs the length before it can read the memory.
+//
+// Calling contract: g_disk_out is assigned by value on every call, so its
+// underlying address can move each time emu_disk_snapshot() runs. The
+// pointer emu_disk_data() returns is only valid until the *next* call to
+// emu_disk_snapshot() (for either drive). Callers MUST: call
+// emu_disk_snapshot(drive), then emu_disk_data(), then copy the bytes out
+// - all before making any other emu_disk_snapshot() call. Never cache the
+// emu_disk_data() pointer across calls (e.g. snapshotting drive 0, then
+// drive 1, then reading both) - a snapshot of the other drive in between
+// invalidates it. This differs from emu_frame_buffer() and
+// emu_audio_buffer() below, whose backing storage is fixed-size and never
+// reassigned, so their pointers stay stable across calls.
+EMSCRIPTEN_KEEPALIVE int emu_disk_snapshot(int drive) {
+    if (!g_machine) return 0;
+    g_disk_out = g_machine->disk_image(drive);
+    return (int)g_disk_out.size();
+}
+
+EMSCRIPTEN_KEEPALIVE const uint8_t* emu_disk_data() {
+    return g_disk_out.data();
+}
+
+EMSCRIPTEN_KEEPALIVE void emu_disk_clear_dirty(int drive) {
+    if (g_machine) g_machine->clear_disk_dirty(drive);
+}
+
+EMSCRIPTEN_KEEPALIVE void emu_disk_set_wp(int drive, int on) {
+    if (g_machine) g_machine->set_disk_write_protected(drive, on != 0);
+}
+
+EMSCRIPTEN_KEEPALIVE int emu_disk_wp(int drive) {
+    return (g_machine && g_machine->disk_write_protected(drive)) ? 1 : 0;
+}
+
 // Cold boot from the disk in drive 0 (the dummy IPL path)
 EMSCRIPTEN_KEEPALIVE int emu_boot() {
     return (g_machine && g_machine->boot_from_disk()) ? 1 : 0;
@@ -60,6 +112,17 @@ EMSCRIPTEN_KEEPALIVE void emu_key(int row, int bit, int down) {
 
 EMSCRIPTEN_KEEPALIVE void emu_joy(int mask) {
     if (g_machine) g_machine->set_joystick_mask(static_cast<uint8_t>(mask));
+}
+
+// Host mouse. Movement is in machine units: the browser scales its own
+// movementX/movementY before calling, because the machine's own ratio
+// setting belongs to the software running on it.
+EMSCRIPTEN_KEEPALIVE void emu_mouse_motion(int dx, int dy) {
+    if (g_machine) g_machine->mouse_move(dx, dy);
+}
+
+EMSCRIPTEN_KEEPALIVE void emu_mouse_button(int index, int down) {
+    if (g_machine) g_machine->mouse_button(index, down != 0);
 }
 
 EMSCRIPTEN_KEEPALIVE int emu_frames() {

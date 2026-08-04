@@ -21,7 +21,6 @@ main { max-width: 1320px; padding: 16px; }
   gap: 16px;
   align-items: start;
 }
-#left-pane details { margin: 0 0 10px; }
 #right-pane { position: sticky; top: 12px; }
 @media (max-width: 1100px) {
   #layout { grid-template-columns: 1fr; }
@@ -29,6 +28,7 @@ main { max-width: 1320px; padding: 16px; }
 }
 h1 { font-size: 20px; letter-spacing: 2px; color: var(--accent); }
 h1 .sub { color: var(--text); font-size: 14px; }
+h1 .build { color: var(--dim, #888); font-size: 11px; font-weight: normal; letter-spacing: 0; }
 #screen-wrap {
   position: relative;
   background: #000;
@@ -74,6 +74,10 @@ h1 .sub { color: var(--text); font-size: 14px; }
 #drivebay {
   display: flex;
   align-items: center;
+  /* the row carries two drives plus four buttons; without this the last of
+     them is pushed off the edge on anything but a very wide window */
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 14px;
   padding: 7px 4px 2px;
   font-size: 12px;
@@ -104,7 +108,37 @@ h1 .sub { color: var(--text); font-size: 14px; }
   cursor: pointer;
 }
 .insbtn:hover, #reset-btn:hover { border-color: var(--accent); }
+#tenkey-btn { margin-left: 8px; }
+#tenkey-btn.on, #vkbd-btn.on {
+  color: #101018;
+  background: var(--accent);
+  border-color: var(--accent);
+}
 #reset-btn { margin-left: auto; }
+#pad-config label { display: block; margin: 4px 0; }
+#pad-config select {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: #2a2a3a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  margin-left: 6px;
+}
+#pad-reset { margin-top: 6px; }
+/* Out of sight but still rendered - a display:none file input never opens
+   its picker in WebKit, which is how the drive bay's 入替 button dies. */
+.offscreen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 #debug-toggle {
   margin-left: auto;
   font-family: inherit;
@@ -136,8 +170,9 @@ h1 .sub { color: var(--text); font-size: 14px; }
   padding: 1px 4px;
 }
 #debug-watch-out { color: #e0d8a0; margin-left: 8px; }
-#rom-config, #hw-config { font-size: 12px; color: #9a9ab0; margin: 8px 0; }
-#rom-config summary, #hw-config summary { cursor: pointer; }
+/* every panel in the left pane, so a new one cannot miss the house style */
+#left-pane details { font-size: 12px; color: #9a9ab0; margin: 8px 0; }
+#left-pane summary { cursor: pointer; }
 .rom-slot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 0; }
 .rom-slot .rname { color: var(--accent); }
 .rom-slot .rstate { flex-basis: 100%; word-break: break-all; }
@@ -145,3 +180,59 @@ h1 .sub { color: var(--text); font-size: 14px; }
 .help { font-size: 12px; color: #9a9ab0; line-height: 1.6; }
 .help .fine { font-size: 10px; color: #667; }
 #screen-wrap.dragover { outline: 3px dashed var(--accent); }
+/* a pressed toggle in the drive bay (write protect) reads as engaged */
+#drivebay .insbtn[aria-pressed="true"] {
+  background: #b34;
+  color: #fff;
+}
+/* ---- on-screen keyboard --------------------------------------------------
+   Laid out in units of one standard key cap (--ku) so the whole keyboard
+   scales as one piece; the tenkey block wraps under the main block once the
+   window is too narrow to hold both. */
+#vkbd {
+  /* one cap. Sized so the main block and the tenkey sit side by side while
+     the centre column is wide enough for both, and the tenkey wraps under
+     the main block once it is not. */
+  --ku: clamp(17px, 2.6vw, 28px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  margin: 8px 0 2px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid #333;
+  border-radius: 5px;
+  /* a cap must never scroll the page under a dragging finger */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#vkbd[hidden] { display: none; }
+.vk-block { display: flex; flex-direction: column; gap: 3px; }
+.vk-row { display: flex; gap: 3px; }
+.vk-gap { display: block; flex: none; }
+.vk {
+  flex: none;
+  height: var(--ku);
+  min-width: 0;
+  padding: 0;
+  font-family: inherit;
+  /* tied to the cap, not the viewport, so the longest legends (BREAK,
+     CLR/HOME) still fit once the keyboard scales itself down */
+  font-size: clamp(6px, calc(var(--ku) * 0.37), 11px);
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  white-space: pre-line;
+  color: var(--text);
+  background: #2a2a3a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  cursor: pointer;
+  overflow: hidden;
+  touch-action: none;
+}
+.vk:hover { border-color: var(--accent); }
+/* held right now (pointer down, or a latched modifier) */
+.vk.down { color: #101018; background: var(--accent); border-color: var(--accent); }
+/* a latching modifier reads as a switch even before it is thrown */
+.vk-mod { background: #33334a; border-color: #55556e; }

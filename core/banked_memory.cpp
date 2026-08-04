@@ -31,7 +31,12 @@ void BankedMemory::load_ipl_rom(const uint8_t* data, size_t size) {
 
 uint8_t BankedMemory::read(uint16_t addr) {
     const int bank = map_[addr >> 13];
-    if (bank == 0x39 && (kanji_bank_ & 0x80)) {
+    // Bank 39h holds the four PCG planes at 2KB each. Port CFh bit7 swaps
+    // the first of them - PCG 0 - for a 2KB window onto the kanji ROM, with
+    // CFh bits 6-0 choosing which of its 128 blocks shows through. PCG 1-3
+    // stay put: only the low 2KB of the bank ever changes. This is the same
+    // block x 800h addressing the text layer uses for a kanji cell.
+    if (bank == 0x39 && (kanji_bank_ & 0x80) && (addr & 0x1FFF) < 0x800) {
         if (kanji_rom_.empty()) {
             if (!warned_rom_bank_[bank]) {
                 warned_rom_bank_[bank] = true;
@@ -39,8 +44,7 @@ uint8_t BankedMemory::read(uint16_t addr) {
             }
             return 0xFF;
         }
-        // experimental paging: CFh low bits select an 8KB page of the ROM
-        const size_t off = ((size_t)(kanji_bank_ & 0x1F) * BANK_SIZE + (addr & 0x1FFF)) %
+        const size_t off = ((size_t)(kanji_bank_ & 0x7F) * 0x800 + (addr & 0x7FF)) %
                            kanji_rom_.size();
         return kanji_rom_[off];
     }
