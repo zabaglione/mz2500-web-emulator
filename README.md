@@ -1,5 +1,10 @@
 # MZ-2500 Web Emulator
 
+## ▶ ブラウザで今すぐ動かす — <https://zabaglione.github.io/mz2500-web-emulator/>
+
+インストール不要。実機 ROM も不要。開くとそのまま
+**NEKO CAN RUN デモ版（WORLD 1）** が起動します。
+
 SHARP MZ-2500 のブラウザエミュレータ。C++ コア → Emscripten/WASM + HTML/JS 構成
 （コンセプト参照: [claude-famicom-emu](https://github.com/GOROman/cluade-famicom-emu)）。
 
