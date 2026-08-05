@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "core/mz1m10.h"
 #include "core/mz2500.h"
 
 namespace mz {
@@ -75,16 +76,19 @@ bool Mz2500::boot_from_disk() {
     // leaves behind.
     cg_mask_ = 0x07;
     std::memset(gde_regs_, 0, sizeof(gde_regs_));
-    std::memset(palette_, 0, sizeof(palette_));
-    // ...and with it the flag that says the MZ-1M10 has been programmed.
-    // The renderer routes the screen through the board's RGB444 entries
-    // only once something has written them; leaving the flag set over a
-    // palette that was just zeroed sends every colour through sixteen
-    // black entries, so a reboot into a program that never touches the
-    // board (one running in its "no palette board" mode, say) would come
-    // up with a blank screen instead of the fixed digital colours. A
-    // freshly constructed machine has the pair the other way round, which
-    // is why the headless CLI - one machine per run - never saw this.
+    // MZ-1M10 palette RAM as the firmware leaves it (core/mz1m10.h). It is
+    // not cleared: the board keeps whatever was written to it, and the
+    // firmware writes a full table on the way through, so a program that
+    // programs only the entries it uses finds the rest already sensible.
+    // Zeroing it here instead put every unwritten entry at black, and the
+    // renderer switches the whole screen - text included - to the board as
+    // soon as one entry is written, so such a program came up blank.
+    mz1m10_firmware_palette(palette_);
+    // ...and the flag that says a *program* has written the board. The
+    // renderer routes the screen through the RGB444 entries only from then
+    // on, so until it flips, a machine whose program never touches the
+    // board (one running in its "no palette board" mode, say) shows the
+    // fixed digital colours rather than the table above.
     palette_written_ = false;
     std::memset(opn_regs_, 0, sizeof(opn_regs_));
 
@@ -173,16 +177,14 @@ bool Mz2500::boot_with_real_ipl() {
     // leaves behind.
     cg_mask_ = 0x07;
     std::memset(gde_regs_, 0, sizeof(gde_regs_));
-    std::memset(palette_, 0, sizeof(palette_));
-    // ...and with it the flag that says the MZ-1M10 has been programmed.
-    // The renderer routes the screen through the board's RGB444 entries
-    // only once something has written them; leaving the flag set over a
-    // palette that was just zeroed sends every colour through sixteen
-    // black entries, so a reboot into a program that never touches the
-    // board (one running in its "no palette board" mode, say) would come
-    // up with a blank screen instead of the fixed digital colours. A
-    // freshly constructed machine has the pair the other way round, which
-    // is why the headless CLI - one machine per run - never saw this.
+    // The palette board keeps its contents across a reset; on this path the
+    // firmware about to run programs the table itself, so seeding it with
+    // the same table (core/mz1m10.h) only makes the two boot paths agree.
+    mz1m10_firmware_palette(palette_);
+    // ...and the flag that says a program has written the board, which the
+    // renderer needs before it routes the screen through the RGB444
+    // entries. A reboot must clear it, or a program that never touches the
+    // board would inherit the previous one's palette selection.
     palette_written_ = false;
     std::memset(opn_regs_, 0, sizeof(opn_regs_));
     int_select_ = 0;

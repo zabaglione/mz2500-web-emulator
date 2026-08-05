@@ -44,6 +44,11 @@ else()
   add_executable(mz2500w-cli cli/main.cpp)
   target_link_libraries(mz2500w-cli PRIVATE mz2500_core)
 
+  # The unit tests are development-tree only: tools/export_public.sh leaves
+  # tests/ behind, so configuring them there would fail on the first missing
+  # source and take the CLI down with it.
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit)
+
   add_executable(test_d88 tests/unit/test_d88.cpp)
   target_link_libraries(test_d88 PRIVATE mz2500_core)
   enable_testing()
@@ -73,7 +78,13 @@ else()
   target_link_libraries(test_mouse_wiring PRIVATE mz2500_core)
   add_test(NAME mouse_wiring COMMAND test_mouse_wiring)
 
+  add_executable(test_palette tests/unit/test_palette.cpp)
+  target_link_libraries(test_palette PRIVATE mz2500_core)
+  add_test(NAME palette COMMAND test_palette)
+
   add_executable(test_vram_wait tests/unit/test_vram_wait.cpp)
   target_link_libraries(test_vram_wait PRIVATE mz2500_core)
   add_test(NAME vram_wait COMMAND test_vram_wait)
+
+  endif()
 endif()
