@@ -44,7 +44,8 @@ THE SOFTWARE.
 - Source: https://github.com/aaronsgiles/ymfm
 - Commit: `81aec25ccbb98f4873a255f7551ac4dadac59b4a`
 - 使用ファイル: `ymfm.h`, `ymfm_fm.h/.ipp`, `ymfm_opn.h/.cpp`, `ymfm_ssg.h/.cpp`,
-  `ymfm_adpcm.h/.cpp`（YM2203 = `ymfm::ym2203` とそのビルド依存のみ）。改変なし。
+  `ymfm_adpcm.h/.cpp`, `ymfm_opl.h/.cpp`, `ymfm_pcm.h/.cpp`
+  （YM2203 = `ymfm::ym2203`、Y8950 = `ymfm::y8950` とそのビルド依存のみ）。改変なし。
 
 License text: `vendor/ymfm/LICENSE`
 

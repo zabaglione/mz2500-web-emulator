@@ -66,4 +66,8 @@ constexpr int PIT_CLOCK_DIV = 192;
 // YM2203 master clock on the MZ-2500.
 constexpr uint32_t OPN_CLOCK_HZ = 2'000'000;
 
+// MZ-1E35 ADPCM board (Y8950): the I/O map gives the master clock as
+// 3.58 MHz - the NTSC colourburst crystal.
+constexpr uint32_t ADPCM_CLOCK_HZ = 3'579'545;
+
 } // namespace mz

@@ -8,8 +8,10 @@
 #include <string>
 #include <vector>
 
+#include "core/adpcm.h"
 #include "core/banked_memory.h"
 #include "core/d88.h"
+#include "core/emm.h"
 #include "core/fdc_mb8877.h"
 #include "core/gcrtc.h"
 #include "core/mouse.h"
@@ -71,13 +73,16 @@ public:
     void set_rom(int kind, const uint8_t* data, size_t size);
 
     // Expansion-board configuration (kind: 0=expansion RAM 256KB,
-    // 1=expansion GRAM second screen, 2=MZ-1M10 4096-colour palette board).
+    // 1=expansion GRAM second screen, 2=MZ-1M10 4096-colour palette board,
+    // 3=MZ-1E35 ADPCM board, 4=MZ-1R37 640K EMM).
     // Takes effect immediately; RAM/GRAM changes want a RESET to be sane.
     void set_hw_option(int kind, bool on) {
         switch (kind) {
         case 0: mem_.set_expansion_ram(on); break;
         case 1: mem_.set_expansion_gram(on); break;
         case 2: mz1m10_present_ = on; break;
+        case 3: adpcm_present_ = on; break;
+        case 4: emm_present_ = on; break;
         }
     }
     bool has_ipl_rom() const { return mem_.has_ipl_rom(); }
@@ -168,6 +173,21 @@ public:
     void poke_memory(uint16_t addr, uint8_t value) { mem_.write(addr, value); }
 
     OpnYm2203& opn() { return opn_; }
+    AdpcmY8950& adpcm() { return adpcm_; }
+
+    // Final audio mix: the OPN stream is the master count, the ADPCM board
+    // is added on top. Both resamplers target the same host rate and are
+    // flushed to the same cycle at frame end, so their sample counts track
+    // within a bounded few samples - the min-drain below never accumulates.
+    size_t read_audio(float* out, size_t max_samples);
+
+    // One knob for both chips: the mix above depends on the two resamplers
+    // sharing a host rate, so the rate is set through here and never on a
+    // single chip.
+    void set_audio_rate(uint32_t rate) {
+        opn_.set_output_rate(rate);
+        adpcm_.set_output_rate(rate);
+    }
 
     // Feed a byte to a SIO channel's receiver, as a device on the line
     // would. Channel B is where the mouse arrives; used to probe what the
@@ -192,6 +212,20 @@ public:
     void test_set_opn_port_a(uint8_t value) { opn_regs_[0x0E] = value; }
     bool test_sio_channel_b_has_data() const { return !sio_[1].rx_empty(); }
     uint8_t test_sio_channel_b_read_byte() { return sio_[1].pop(); }
+
+    // Test-only I/O access, narrowed to the option boards' ports (ACh/ADh
+    // EMM, 98h/99h ADPCM). The mouse hooks above explain why the full I/O
+    // map stays closed to tests.
+    uint8_t test_option_board_in(uint16_t port) {
+        const uint8_t low = port & 0xFF;
+        if (low == 0xAD || low == 0x98 || low == 0x99) return io_in_raw(port);
+        return 0xFF;
+    }
+    void test_option_board_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if (low == 0xAC || low == 0xAD || low == 0x98 || low == 0x99)
+            io_out(port, value);
+    }
 
     // Machine state snapshot as JSON (debug panel / future tooling).
     // Returns the number of bytes written (excluding the terminator).
@@ -234,6 +268,7 @@ private:
     D88Disk disks_[FdcMb8877::NUM_DRIVES];
     FdcMb8877 fdc_;
     OpnYm2203 opn_;
+    AdpcmY8950 adpcm_;
 
     // register latches for devices that later phases bring to life
     uint8_t opn_addr_ = 0;
@@ -351,6 +386,9 @@ private:
     uint8_t ppi_[3] = {};         // 8255 A/B/C latches (E0h-E2h)
     uint8_t pio_ctrl_[2] = {};    // Z80 PIO control words (E9h/EBh)
     bool mz1m10_present_ = true;  // 4096-colour palette board option
+    bool adpcm_present_ = true;   // MZ-1E35 ADPCM board option
+    bool emm_present_ = true;     // MZ-1R37 640K EMM option
+    Emm emm_;
     uint8_t joy_enable_ = 0;      // port EFh
     uint8_t key_rows_[16] = {};   // pressed bits per matrix row
     uint8_t joy_mask_ = 0;        // pressed joystick bits

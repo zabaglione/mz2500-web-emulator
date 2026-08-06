@@ -18,7 +18,7 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE int emu_init(int audio_rate) {
     delete g_machine;
     g_machine = new mz::Mz2500();
-    if (audio_rate > 0) g_machine->opn().set_output_rate(static_cast<uint32_t>(audio_rate));
+    if (audio_rate > 0) g_machine->set_audio_rate(static_cast<uint32_t>(audio_rate));
     return 1;
 }
 
@@ -103,7 +103,7 @@ EMSCRIPTEN_KEEPALIVE int emu_audio_capacity() { return (int)g_audio.size(); }
 
 EMSCRIPTEN_KEEPALIVE int emu_read_audio() {
     if (!g_machine) return 0;
-    return (int)g_machine->opn().read_audio(g_audio.data(), g_audio.size());
+    return (int)g_machine->read_audio(g_audio.data(), g_audio.size());
 }
 
 EMSCRIPTEN_KEEPALIVE void emu_key(int row, int bit, int down) {

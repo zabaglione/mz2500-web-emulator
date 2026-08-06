@@ -334,6 +334,19 @@ uint8_t Mz2500::io_in_raw(uint16_t port) {
         // RP5C15 RTC: bus address bits A11-A8 select the register (16-bit
         // I/O decode, like the palette port). Registers are 4 bits wide.
         return rtc_read((port >> 8) & 0x0F);
+    case 0x98:
+        if (adpcm_present_) return adpcm_.read_status(cpu_.cyc);
+        log_port_once(port, "in");
+        return 0xFF;
+    case 0x99:
+        if (adpcm_present_) return adpcm_.read_data(cpu_.cyc);
+        log_port_once(port, "in");
+        return 0xFF;
+    case 0xAD:
+        // MZ-1R37 EMM data window: bus A15-A8 supplies address bits 7:0
+        if (emm_present_) return emm_.read((port >> 8) & 0xFF);
+        log_port_once(port, "in");
+        return 0xFF;
     case 0xAF:
         // TV tuner control board (MZ-1T01 class option, not installed):
         // bit0 = TVPOWER input. An absent tuner reads 0, the same trap as
@@ -406,6 +419,24 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         }
         return;
     }
+    case 0x98:
+        if (adpcm_present_) adpcm_.write_address(value, cpu_.cyc);
+        else log_port_once(port, "out"); // board not installed
+        return;
+    case 0x99:
+        if (adpcm_present_) adpcm_.write_data(value, cpu_.cyc);
+        else log_port_once(port, "out"); // board not installed
+        return;
+    case 0xAC:
+        // MZ-1R37 EMM address latch: bits 19:16 ride the bus's high byte,
+        // bits 15:8 are the written value. No auto-increment.
+        if (emm_present_) emm_.latch((port >> 8) & 0xFF, value);
+        else log_port_once(port, "out"); // board not installed
+        return;
+    case 0xAD:
+        if (emm_present_) emm_.write((port >> 8) & 0xFF, value);
+        else log_port_once(port, "out"); // board not installed
+        return;
     case 0xAE:
         if (mz1m10_present_) {
             palette_[(port >> 8) & 0x1F] = value;
@@ -816,8 +847,30 @@ void Mz2500::run_frame() {
         service_interrupts();
     }
     opn_.flush_to(cpu_.cyc);
+    // flush unconditionally so chip time stays synchronized even with the
+    // board pulled - re-enabling it later needs no resync - but drop the
+    // samples it produced while nobody is draining the ring, or a
+    // --no-adpcm run grows it without bound (~4.3MB/1000 frames).
+    adpcm_.flush_to(cpu_.cyc);
+    if (!adpcm_present_) adpcm_.discard_audio();
     frame_origin_ = end;
     frames_++;
+}
+
+size_t Mz2500::read_audio(float* out, size_t max_samples) {
+    const size_t n = opn_.read_audio(out, max_samples);
+    if (adpcm_present_ && n > 0) {
+        float tmp[512];
+        size_t added = 0;
+        while (added < n) {
+            const size_t want = std::min(n - added, sizeof(tmp) / sizeof(tmp[0]));
+            const size_t m = adpcm_.read_audio(tmp, want);
+            if (m == 0) break;
+            for (size_t i = 0; i < m; i++) out[added + i] += tmp[i];
+            added += m;
+        }
+    }
+    return n;
 }
 
 } // namespace mz

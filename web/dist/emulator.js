@@ -303,6 +303,8 @@ const HW_OPTIONS = [
   { id: "hw-expram", kind: 0, key: "mzw_hw_expram" },
   { id: "hw-expgram", kind: 1, key: "mzw_hw_expgram" },
   { id: "hw-mz1m10", kind: 2, key: "mzw_hw_mz1m10" },
+  { id: "hw-adpcm", kind: 3, key: "mzw_hw_adpcm" },
+  { id: "hw-emm", kind: 4, key: "mzw_hw_emm" },
 ];
 function applyHwOptionsToMachine() {
   if (!Module) return;

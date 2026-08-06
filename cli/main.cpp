@@ -215,7 +215,9 @@ void usage() {
         "                        DTR strobe path, not straight into the SIO line)\n"
         "  --audio-wav PATH      write mono 16-bit 44.1kHz WAV of the OPN output\n"
         "  --audio-range S:E     restrict the WAV to frames [S,E)\n"
-        "  --trace-opn PATH      log every OPN register write as cycle,reg,value\n");
+        "  --trace-opn PATH      log every OPN register write as cycle,reg,value\n"
+        "  --no-adpcm            remove the MZ-1E35 ADPCM board (ports 98h/99h)\n"
+        "  --no-emm              remove the MZ-1R37 640K EMM (ports ACh/ADh)\n");
 }
 
 // Render the current frame to a 640x400 binary PPM. Shared by --screenshot
@@ -265,6 +267,7 @@ int main(int argc, char** argv) {
     std::string rom_dir;
     bool real_ipl = false;
     bool no_exp_ram = false, no_exp_gram = false, no_mz1m10 = false;
+    bool no_adpcm = false, no_emm = false;
     long trace_trap = -1;
     bool trace_io = false;
     bool dump_io = false;
@@ -583,6 +586,10 @@ int main(int argc, char** argv) {
             no_exp_gram = true;
         } else if (arg == "--no-mz1m10") {
             no_mz1m10 = true;
+        } else if (arg == "--no-adpcm") {
+            no_adpcm = true;
+        } else if (arg == "--no-emm") {
+            no_emm = true;
         } else if (arg == "--fm-lpf-hz") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -635,6 +642,8 @@ int main(int argc, char** argv) {
     if (no_exp_ram) machine.set_hw_option(0, false);
     if (no_exp_gram) machine.set_hw_option(1, false);
     if (no_mz1m10) machine.set_hw_option(2, false);
+    if (no_adpcm) machine.set_hw_option(3, false);
+    if (no_emm) machine.set_hw_option(4, false);
     if (!rom_dir.empty()) {
         static const struct { const char* file; int kind; } roms[] = {
             {"ipl.rom", 0}, {"cg.rom", 1}, {"kanji.rom", 2}, {"dict.rom", 3}};
@@ -728,7 +737,7 @@ int main(int argc, char** argv) {
         {
             float buf[4096];
             size_t n;
-            while ((n = machine.opn().read_audio(buf, 4096)) > 0) {
+            while ((n = machine.read_audio(buf, 4096)) > 0) {
                 if (audio_wav_path.empty()) continue;
                 if (i < audio_start || (audio_end >= 0 && i >= audio_end)) continue;
                 for (size_t s = 0; s < n; s++) {

@@ -16,11 +16,14 @@ add_library(mz2500_core STATIC
   core/fdc_mb8877.cpp
   core/mz2500.cpp
   core/opn.cpp
+  core/adpcm.cpp
   core/renderer.cpp
   vendor/z80/z80.c
   vendor/ymfm/ymfm_opn.cpp
   vendor/ymfm/ymfm_ssg.cpp
   vendor/ymfm/ymfm_adpcm.cpp
+  vendor/ymfm/ymfm_opl.cpp
+  vendor/ymfm/ymfm_pcm.cpp
 )
 target_include_directories(mz2500_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -85,6 +88,14 @@ else()
   add_executable(test_vram_wait tests/unit/test_vram_wait.cpp)
   target_link_libraries(test_vram_wait PRIVATE mz2500_core)
   add_test(NAME vram_wait COMMAND test_vram_wait)
+
+  add_executable(test_emm tests/unit/test_emm.cpp)
+  target_link_libraries(test_emm PRIVATE mz2500_core)
+  add_test(NAME emm COMMAND test_emm)
+
+  add_executable(test_adpcm tests/unit/test_adpcm.cpp)
+  target_link_libraries(test_adpcm PRIVATE mz2500_core)
+  add_test(NAME adpcm COMMAND test_adpcm)
 
   endif()
 endif()

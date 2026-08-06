@@ -1,5 +1,6 @@
 #include "core/opn.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "core/timing.h"
