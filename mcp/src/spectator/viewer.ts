@@ -22,6 +22,8 @@ export const VIEWER_HTML = `<!doctype html>
   td, th { border: 1px solid #3a3e45; padding: 2px 8px; text-align: left; }
   .on { color: #7f7; }
   .off { color: #666; }
+  a { color: #8ab; }
+  .me { color: #7f7; }
 </style>
 </head>
 <body>
@@ -30,6 +32,8 @@ export const VIEWER_HTML = `<!doctype html>
   <div id="status">▶ を押すと観戦を開始します（音が出ます）</div>
   <button id="start">▶ 観戦開始</button>
   <button id="live" disabled>最新へジャンプ</button>
+  <label style="margin-left:12px"><input type="checkbox" id="paced">
+    等速再生（音を正しく聴く。AIの高速実行から遅れます）</label>
 </div>
 <div id="panel">
   <h3>サウンド (YM2203)</h3>
@@ -39,6 +43,8 @@ export const VIEWER_HTML = `<!doctype html>
     <tr><td>フレーム</td><td id="frameno">-</td></tr>
     <tr><td>遅延</td><td id="lag">-</td></tr>
   </tbody></table>
+  <h3>セッション一覧</h3>
+  <table id="sessions"><tbody><tr><td>検索中…</td></tr></tbody></table>
 </div>
 <script>
 "use strict";
@@ -47,6 +53,11 @@ var ctx2d = canvas.getContext("2d");
 var statusEl = document.getElementById("status");
 var startBtn = document.getElementById("start");
 var liveBtn = document.getElementById("live");
+// Default is live mode: always show the newest frame and discard whatever
+// the 1x clock cannot keep up with — the AI routinely runs the machine many
+// times faster than real time, so a paced viewer inevitably falls behind.
+// The checkbox opts into the old paced playback for listening to music.
+var pacedEl = document.getElementById("paced");
 
 var audioCtx = null;
 var info = null;            // stream header
@@ -101,16 +112,21 @@ function onMessage(type, frameNo, body) {
     decodeChain = decodeChain.then(function (prev) {
       return createImageBitmap(blob).then(function (bmp) {
         videoQueue.push({ frameNo: frameNo, bitmap: bmp });
+        trimLiveQueues();
         return bmp;
       });
     });
   } else if (type === 2) { // repeat: alias the previous bitmap
     decodeChain = decodeChain.then(function (prev) {
       if (prev) videoQueue.push({ frameNo: frameNo, bitmap: prev });
+      trimLiveQueues();
       return prev;
     });
   } else if (type === 3) { // audio: schedule at the buffer head
     if (!audioCtx) return;
+    // live mode: never build more than 0.5s of audio backlog — what the
+    // 1x clock cannot keep up with is discarded, not saved for later
+    if (!pacedEl.checked && nextTime - audioCtx.currentTime > 0.5) return;
     var n = body.length >> 1;
     var buf = audioCtx.createBuffer(1, Math.max(n, 1), info.audioRate);
     var ch = buf.getChannelData(0);
@@ -131,6 +147,23 @@ function onMessage(type, frameNo, body) {
   } else if (type === 4) { // state: queue until playback reaches its frame
     stateQueue.push({ frameNo: frameNo, state: JSON.parse(new TextDecoder().decode(body)) });
   }
+}
+
+// In live mode a hidden tab's rAF stops but the stream keeps flowing, so
+// cap the queues (closing dropped bitmaps frees their GPU memory). Paced
+// mode keeps its full backlog by design.
+function trimLiveQueues() {
+  if (pacedEl.checked) return;
+  while (videoQueue.length > 30) {
+    var v = videoQueue.shift();
+    // "repeat" entries alias the previous entry's bitmap: only close it
+    // once no queued entry still points at it
+    var reused = videoQueue.some(function (e) { return e.bitmap === v.bitmap; });
+    if (v.bitmap && !reused && v.bitmap.close) {
+      try { v.bitmap.close(); } catch (e) {}
+    }
+  }
+  while (stateQueue.length > 30) stateQueue.shift();
 }
 
 function renderSound(s) {
@@ -155,6 +188,34 @@ function tick() {
   requestAnimationFrame(tick);
   if (!audioCtx) return;
   var t = audioCtx.currentTime;
+  // Live mode: newest frame wins, everything older is discarded — the
+  // audio clock paces nothing here (its backlog is capped at arrival).
+  if (!pacedEl.checked) {
+    if (videoQueue.length) {
+      var newest = videoQueue[videoQueue.length - 1];
+      ctx2d.drawImage(newest.bitmap, 0, 0);
+      playFrame = newest.frameNo;
+      videoQueue = [];
+    }
+    if (stateQueue.length) {
+      renderSound(stateQueue[stateQueue.length - 1].state);
+      stateQueue = [];
+    }
+  }
+  // No audio pending but video queued: show the newest immediately. This
+  // covers the connect/reconnect snapshot, and video that arrived without
+  // its audio — the clock that normally carries it only advances while
+  // the AI is actually running the machine.
+  if (videoQueue.length && !timeline.length && nextTime <= t) {
+    var seed = videoQueue[videoQueue.length - 1];
+    ctx2d.drawImage(seed.bitmap, 0, 0);
+    playFrame = seed.frameNo;
+    videoQueue = [];
+    if (stateQueue.length) {
+      renderSound(stateQueue[stateQueue.length - 1].state);
+      stateQueue = [];
+    }
+  }
   while (timeline.length && timeline[0].at <= t) playFrame = timeline.shift().frameNo;
   var drew = null;
   while (videoQueue.length && videoQueue[0].frameNo <= playFrame) drew = videoQueue.shift();
@@ -164,10 +225,17 @@ function tick() {
   if (stateDrew) renderSound(stateDrew.state);
   document.getElementById("frameno").textContent = playFrame < 0 ? "-" : String(playFrame);
   var lag = Math.max(0, nextTime - t);
+  // The AI routinely runs the machine several times faster than real time,
+  // so the backlog can outgrow any hope of catching up at 1x. Beyond a few
+  // seconds, jump to the live edge instead of replaying minutes of past.
+  if (lag > 5) {
+    jumpToLive();
+    lag = 0;
+  }
   document.getElementById("lag").textContent = lag.toFixed(1) + "s";
   liveBtn.disabled = lag < 1;
   if (!streamOpen || performance.now() - lastHeartbeat > 5000) {
-    setStatus("⏹ 切断されました — 再読み込みで再接続");
+    setStatus("⏹ 切断 — 自動再接続中…");
   } else if (nextTime <= t) {
     setStatus("⏸ AIの操作待ち（マシン停止中）");
   } else {
@@ -190,24 +258,82 @@ function jumpToLive() {
   nextTime = 0;
 }
 liveBtn.addEventListener("click", jumpToLive);
+// Switching modes starts clean from the live edge either way: stop the
+// scheduled audio, show the newest frame, drop the backlog.
+pacedEl.addEventListener("change", jumpToLive);
 
-// ---- stream reader ----
+// ---- stream reader (auto-reconnecting) ----
+var reconnectTimer = null;
+function scheduleReconnect() {
+  streamOpen = false;
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(function () {
+    reconnectTimer = null;
+    connect();
+  }, 1000);
+}
 function connect() {
+  // Fresh connection = fresh protocol stream: reset the incremental parser
+  // and drop the stale backlog — the server greets us with a snapshot of
+  // the machine's current screen anyway.
+  parseBuf = new Uint8Array(0);
+  haveHeader = false;
+  jumpToLive();
   fetch("/stream").then(function (res) {
     var reader = res.body.getReader();
     streamOpen = true;
     lastHeartbeat = performance.now();
     function pump() {
       reader.read().then(function (r) {
-        if (r.done) { streamOpen = false; return; }
+        if (r.done) { scheduleReconnect(); return; }
         lastHeartbeat = performance.now();
         parseChunk(r.value, onMessage);
         pump();
-      }, function () { streamOpen = false; });
+      }, scheduleReconnect);
     }
     pump();
-  }, function () { streamOpen = false; });
+  }, scheduleReconnect);
 }
+
+// ---- session list ----
+// Sibling MCP server instances fall back to neighboring ports when this
+// one's port is taken, so scan a small window around our own port and list
+// every /info that answers. The human always just opens the well-known
+// port; hopping to another session is one click here.
+function esc(x) {
+  return String(x).replace(/[&<>"']/g, function (c) { return "&#" + c.charCodeAt(0) + ";"; });
+}
+function scanSessions() {
+  var mine = Number(location.port || 80);
+  var ports = [];
+  for (var p = Math.max(1, mine - 9); p <= mine + 9; p++) ports.push(p);
+  Promise.all(ports.map(function (p) {
+    return fetch("http://" + location.hostname + ":" + p + "/info")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  })).then(function (all) {
+    var rows = [];
+    for (var i = 0; i < all.length; i++) {
+      var s = all[i];
+      if (!s || s.app !== "mz2500-mcp") continue;
+      var started = s.startedAt ? new Date(s.startedAt).toLocaleTimeString() : "?";
+      var label = esc(s.disk || "?") + " f" + esc(s.frameNo != null ? s.frameNo : "?") +
+        " (" + esc(started) + "起動)";
+      var title = s.workdir ? ' title="' + esc(s.workdir) + '"' : "";
+      if (s.port === mine) {
+        rows.push("<tr" + title + '><td class="me">▶ :' + esc(s.port) + "</td><td>" +
+          label + "</td></tr>");
+      } else {
+        rows.push("<tr" + title + '><td><a href="http://' + location.hostname + ":" +
+          esc(s.port) + '/">:' + esc(s.port) + "</a></td><td>" + label + "</td></tr>");
+      }
+    }
+    if (!rows.length) rows.push("<tr><td>-</td></tr>");
+    document.getElementById("sessions").innerHTML = "<tbody>" + rows.join("") + "</tbody>";
+  });
+}
+scanSessions();
+setInterval(scanSessions, 10000);
 
 startBtn.addEventListener("click", function () {
   if (audioCtx) return;

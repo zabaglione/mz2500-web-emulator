@@ -17,17 +17,33 @@ export interface FrameSink {
 
 export interface HubOptions {
   port: number; // 0 = OS-assigned ephemeral port (tests); disabling is the caller's job
+  /** How many consecutive ports (port, port+1, …) to try when the base
+   * port is taken by another instance. Ignored for port 0. Default 10. */
+  portAttempts?: number;
   audioRate: number;
+  /** Extra per-session facts (current frame, disk name, …) merged into the
+   * GET /info response, which sibling viewers use to build a session list. */
+  infoFn?: () => Record<string, unknown>;
   stateFn: () => unknown;
+  /** Current screen for a just-connected viewer. Without it a viewer that
+   * joins while no tool is running stares at black until the next tool
+   * call pushes a frame — with the tool-driven time model that can be
+   * arbitrarily far away. */
+  snapshotFn?: () => { frameNo: number; rgba: Uint8Array } | null;
   width?: number;
   height?: number;
   log?: (msg: string) => void;
 }
 
-/** Above this many buffered bytes a client stops getting video… */
-const VIDEO_SKIP_BYTES = 1 * 1024 * 1024;
-/** …and above this it is disconnected (rejoin lands on the live edge). */
-const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** Above this many buffered bytes a client stops getting video, audio and
+ * state — only heartbeats, until it drains. The emulator regularly runs
+ * many times faster than real time inside a tool call, so a real-time
+ * viewer falling behind is the NORMAL case, not a defect: degrade, never
+ * disconnect. (An earlier build disconnected at 8MB, which made the view
+ * flap 切断/再生中 on every long tool call.) */
+const PRESSURE_SKIP_BYTES = 1 * 1024 * 1024;
+/** Hard safety valve for a socket that has stopped draining entirely. */
+const MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
 
 export class SpectatorHub {
   private readonly opts: HubOptions;
@@ -41,6 +57,8 @@ export class SpectatorHub {
   private prevFrame: Buffer | null = null;
   private prevState = "";
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private lastBeatMs = 0;
+  private startedAt = 0;
 
   constructor(opts: HubOptions) {
     this.opts = opts;
@@ -49,20 +67,36 @@ export class SpectatorHub {
     this.log = opts.log ?? ((m) => console.error(`[mz2500-mcp] ${m}`));
   }
 
-  /** Listen on 127.0.0.1. Resolves the real port, or null when the port is
-   * taken — the MCP server must keep running without the spectator view. */
+  /** Listen on 127.0.0.1, walking up from the base port when it is taken by
+   * a sibling instance. Resolves the real port, or null when every attempt
+   * failed — the MCP server must keep running without the spectator view. */
   start(): Promise<number | null> {
+    const attempts = this.opts.port === 0 ? 1 : Math.max(1, this.opts.portAttempts ?? 10);
+    return this.tryListen(this.opts.port, attempts);
+  }
+
+  private tryListen(port: number, attemptsLeft: number): Promise<number | null> {
     return new Promise((done) => {
       const server = createServer((req, res) => this.handle(req, res));
       server.on("error", (err) => {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "EADDRINUSE" && attemptsLeft > 1) {
+          this.log(`spectator port ${port} taken by another instance — trying ${port + 1}`);
+          done(this.tryListen(port + 1, attemptsLeft - 1));
+          return;
+        }
         this.log(`spectator view disabled: ${(err as Error).message}`);
         this.server = null;
         done(null);
       });
-      server.listen(this.opts.port, "127.0.0.1", () => {
+      server.listen(port, "127.0.0.1", () => {
         this.server = server;
         this.port = (server.address() as AddressInfo).port;
-        this.heartbeat = setInterval(() => this.broadcast(encodeMessage(MSG.heartbeat)), 1000);
+        this.startedAt = Date.now();
+        this.heartbeat = setInterval(() => {
+          this.lastBeatMs = Date.now();
+          this.broadcast(encodeMessage(MSG.heartbeat), "must");
+        }, 1000);
         this.heartbeat.unref();
         done(this.port);
       });
@@ -95,6 +129,15 @@ export class SpectatorHub {
    * unchanged), always audio, state only when it changed. */
   push(frameNo: number, rgba: Uint8Array, audio: Float32Array): void {
     if (this.clients.size === 0) return;
+    // Wall-clock heartbeat from inside the frame loop: a long tool call
+    // blocks the event loop, so the setInterval heartbeat cannot fire even
+    // though frames are flowing — and a pressured client that is having its
+    // data skipped would see total silence and think the server died.
+    const now = Date.now();
+    if (now - this.lastBeatMs >= 1000) {
+      this.lastBeatMs = now;
+      this.broadcast(encodeMessage(MSG.heartbeat), "must");
+    }
     let videoMsg: Buffer | null = null;
     if (this.prevFrame && this.prevFrame.length === rgba.length && this.prevFrame.compare(rgba) === 0) {
       videoMsg = encodeMessage(MSG.repeat, withFrameNo(frameNo));
@@ -109,7 +152,7 @@ export class SpectatorHub {
         this.log(`spectator frame encode failed: ${err}`);
       }
     }
-    if (videoMsg) this.broadcast(videoMsg, true);
+    if (videoMsg) this.broadcast(videoMsg, "video");
     this.broadcast(encodeMessage(MSG.audio, withFrameNo(frameNo, floatTo16(audio))));
     const state = JSON.stringify(this.opts.stateFn());
     if (state !== this.prevState) {
@@ -118,19 +161,21 @@ export class SpectatorHub {
     }
   }
 
-  private broadcast(msg: Buffer, isVideo = false): void {
+  private broadcast(msg: Buffer, kind: "must" | "video" | "data" = "data"): void {
     for (const res of this.clients) {
       if (res.writableLength > MAX_BUFFERED_BYTES) {
-        this.log("spectator client too slow — disconnecting");
+        this.log("spectator client socket stopped draining — disconnecting");
         res.destroy(); // close handler removes it from clients
         continue;
       }
-      if (isVideo && res.writableLength > VIDEO_SKIP_BYTES) {
-        // This client didn't get the frame, so its next video message must
-        // be a full keyframe rather than a `repeat` it never had a base for.
-        // Cheap to force for everyone; clients still under pressure just
-        // keep skipping until they catch up.
+      if (kind !== "must" && res.writableLength > PRESSURE_SKIP_BYTES) {
+        // This client missed the message, so the dedupe baselines are no
+        // longer something it has: its next video must be a full keyframe
+        // (not a `repeat` it never had a base for) and its next state a
+        // full resend. Cheap to force for everyone; clients still under
+        // pressure just keep skipping until they catch up.
         this.prevFrame = null;
+        this.prevState = "";
         continue;
       }
       res.write(msg);
@@ -149,13 +194,44 @@ export class SpectatorHub {
     return origin === `http://127.0.0.1:${this.port}` || origin === `http://localhost:${this.port}`;
   }
 
+  /** /info may be fetched by a viewer page served from a SIBLING port
+   * (session list), so any localhost origin is fine there — the Host check
+   * still applies, and the response carries no secrets. */
+  private infoRequestAllowed(req: IncomingMessage): boolean {
+    const host = req.headers.host;
+    if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) return false;
+    const origin = req.headers.origin;
+    if (!origin) return true;
+    return /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
+  }
+
   private handle(req: IncomingMessage, res: ServerResponse): void {
-    if (!this.requestAllowed(req)) {
+    const url = req.url ?? "/";
+    if (!(url === "/info" ? this.infoRequestAllowed(req) : this.requestAllowed(req))) {
       res.writeHead(403, { "content-type": "text/plain" });
       res.end("forbidden");
       return;
     }
-    const url = req.url ?? "/";
+    if (url === "/info") {
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      };
+      const origin = req.headers.origin;
+      if (origin) headers["access-control-allow-origin"] = origin; // validated above
+      res.writeHead(200, headers);
+      res.end(
+        JSON.stringify({
+          app: "mz2500-mcp",
+          pid: process.pid,
+          port: this.port,
+          startedAt: this.startedAt,
+          viewers: this.clients.size,
+          ...(this.opts.infoFn?.() ?? {}),
+        }),
+      );
+      return;
+    }
     if (url === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(VIEWER_HTML);
@@ -177,6 +253,28 @@ export class SpectatorHub {
       // late joiner not staring at a blank canvas.
       this.prevFrame = null;
       this.prevState = "";
+      // And since the next push() only happens once a tool call advances
+      // the machine, hand this viewer the machine's current screen right
+      // now — between tool calls "the next push" can be minutes away.
+      const snap = this.opts.snapshotFn?.();
+      if (snap) {
+        try {
+          res.write(
+            encodeMessage(
+              MSG.video,
+              withFrameNo(snap.frameNo, encodePng(snap.rgba, this.width, this.height, 1)),
+            ),
+          );
+          res.write(
+            encodeMessage(
+              MSG.state,
+              withFrameNo(snap.frameNo, Buffer.from(JSON.stringify(this.opts.stateFn()), "utf8")),
+            ),
+          );
+        } catch (err) {
+          this.log(`spectator snapshot failed: ${err}`);
+        }
+      }
       this.clients.add(res);
       this.syncHook();
       res.on("close", () => {

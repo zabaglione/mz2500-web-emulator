@@ -5,6 +5,7 @@
 //     --workdir ./mz2500-work
 //
 // All logging goes to stderr; stdout carries the MCP stdio transport.
+import { basename } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseConfig } from "./config.js";
 import { Session } from "./session.js";
@@ -27,12 +28,18 @@ async function main(): Promise<void> {
     const hub = new SpectatorHub({
       port: config.spectatePort,
       audioRate: session.emu.audioRate,
+      infoFn: () => ({
+        frameNo: session.emu.frames(),
+        disk: config.diskA ? basename(config.diskA) : null,
+        workdir: config.workdir,
+      }),
       stateFn: () =>
         decodeSoundState(
           Uint8Array.from(session.emu.opnRegs()),
           (ch) => session.emu.fmKeyon(ch),
           session.emu.beepOn(),
         ),
+      snapshotFn: () => ({ frameNo: session.emu.frames(), rgba: session.emu.renderFrame() }),
     });
     if ((await hub.start()) !== null) {
       hub.attach(session.emu);

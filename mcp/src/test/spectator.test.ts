@@ -7,6 +7,7 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { request } from "node:http";
+import { createConnection } from "node:net";
 import {
   MSG,
   encodeHeader,
@@ -105,7 +106,15 @@ test("emulator: onFrame fires per frame and coexists with record()", { skip: !wa
 test("viewer: single self-contained page", () => {
   assert.match(VIEWER_HTML, /<canvas id="screen" width="640" height="400">/);
   assert.match(VIEWER_HTML, /fetch\("\/stream"\)/);
-  assert.ok(!VIEWER_HTML.includes("http://"), "no external references");
+  // The session list talks to sibling ports on this machine; anything else
+  // stays forbidden.
+  const external = VIEWER_HTML.replace(/http:\/\/["'] \+ location\.hostname/g, "");
+  assert.ok(!external.includes("http://"), "no external references");
+});
+
+test("viewer: lists sibling sessions discovered via /info", () => {
+  assert.match(VIEWER_HTML, /\/info/);
+  assert.match(VIEWER_HTML, /セッション一覧/);
 });
 
 function testRgba(seed: number): Uint8Array {
@@ -182,6 +191,79 @@ test("hub: serves the viewer, streams frames, dedupes video and state", async ()
   hub.close();
 });
 
+test("hub: falls back to the next free port when the base port is taken", async () => {
+  const hubA = new SpectatorHub({ port: 0, audioRate: 44100, stateFn: () => ({}), log: () => {} });
+  const base = await hubA.start();
+  assert.ok(base !== null && base > 0);
+
+  const hubB = new SpectatorHub({ port: base!, audioRate: 44100, stateFn: () => ({}), log: () => {} });
+  const portB = await hubB.start();
+  assert.ok(
+    portB !== null && portB > base! && portB <= base! + 9,
+    `expected a port just above ${base}, got ${portB}`,
+  );
+  assert.equal(hubB.url(), `http://127.0.0.1:${portB}/`);
+
+  // With a single attempt the old behavior remains: degrade to disabled.
+  const hubC = new SpectatorHub({
+    port: base!,
+    portAttempts: 1,
+    audioRate: 44100,
+    stateFn: () => ({}),
+    log: () => {},
+  });
+  assert.equal(await hubC.start(), null);
+
+  hubB.close();
+  hubA.close();
+});
+
+test("hub: /info reports session facts and allows cross-port localhost viewers", async () => {
+  const hub = new SpectatorHub({
+    port: 0,
+    audioRate: 44100,
+    stateFn: () => ({}),
+    infoFn: () => ({ frameNo: 42, disk: "basic-m25.d88" }),
+    log: () => {},
+  });
+  const port = await hub.start();
+
+  // A viewer page served from a sibling port must be able to read /info.
+  const res = await fetch(`http://127.0.0.1:${port}/info`, {
+    headers: { origin: "http://127.0.0.1:9999" },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), "http://127.0.0.1:9999");
+  const body = await res.json();
+  assert.equal(body.app, "mz2500-mcp");
+  assert.equal(body.port, port);
+  assert.equal(body.pid, process.pid);
+  assert.equal(typeof body.startedAt, "number");
+  assert.equal(body.viewers, 0);
+  assert.equal(body.frameNo, 42);
+  assert.equal(body.disk, "basic-m25.d88");
+
+  // Anything that is not a localhost origin stays rejected.
+  const evil = await fetch(`http://127.0.0.1:${port}/info`, {
+    headers: { origin: "http://evil.example" },
+  });
+  assert.equal(evil.status, 403);
+  // And the Host check (DNS-rebinding defense) still applies to /info.
+  const rebind = await new Promise<number>((resolve, reject) => {
+    const req = request(
+      { host: "127.0.0.1", port: port!, path: "/info", headers: { host: "evil.example:8425" } },
+      (r) => {
+        r.resume();
+        resolve(r.statusCode!);
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(rebind, 403);
+  hub.close();
+});
+
 test("hub: rejects cross-origin requests", async () => {
   const hub = new SpectatorHub({ port: 0, audioRate: 44100, stateFn: () => ({}), log: () => {} });
   const port = await hub.start();
@@ -211,6 +293,34 @@ test("hub: late joiner gets a fresh keyframe even when pixels are unchanged", as
   const msgsB = await readMessages(resB.body!, 1);
   assert.equal(msgsB[0].type, MSG.video, "late joiner must get a full frame, not a repeat");
 
+  hub.close();
+});
+
+test("hub: a viewer that stops reading is degraded, never disconnected", async () => {
+  const hub = new SpectatorHub({ port: 0, audioRate: 44100, stateFn: () => ({}), log: () => {} });
+  const port = await hub.start();
+
+  // A raw socket that sends the request and then never reads: the kernel
+  // buffer fills and the hub's writableLength climbs past the skip
+  // threshold. The tool-driven emulator outrunning a real-time viewer is
+  // the normal case, so this client must be degraded (skipped), not killed.
+  const sock = createConnection({ host: "127.0.0.1", port: port! });
+  await new Promise<void>((r) => sock.on("connect", () => r()));
+  sock.write(`GET /stream HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`);
+  sock.pause();
+  let closed = false;
+  sock.on("close", () => (closed = true));
+  await new Promise((r) => setTimeout(r, 100)); // request handled, client registered
+
+  // Noise compresses to roughly its own size, so each push is ~1MB of PNG.
+  const noise = new Uint8Array(640 * 400 * 4);
+  for (let i = 0; i < 24; i++) {
+    for (let j = 0; j < noise.length; j += 97) noise[j] = (noise[j] + i * 31 + j) & 0xff;
+    hub.push(i, noise, new Float32Array(800));
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(closed, false, "pressured client stays connected");
+  sock.destroy();
   hub.close();
 });
 
@@ -270,7 +380,9 @@ test("spectator e2e: doremi PLAY is observable over the stream", { skip: !haveBa
 
   const msgs = await readMessages(res.body!, 300);
   const audio = msgs.filter((m) => m.type === MSG.audio);
-  // Video messages may be backpressure-skipped during the synchronous burst; audio is never skipped.
+  // Under backpressure the hub degrades (skips video AND audio) rather than
+  // disconnecting; this eager reader drains fast enough to stay under the
+  // threshold, so the audio stream arrives complete here.
   assert.ok(audio.length >= 140, `audio frames (got ${audio.length})`);
   let peak = 0;
   for (const a of audio) {
