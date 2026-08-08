@@ -59,6 +59,13 @@ export class SpectatorHub {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private lastBeatMs = 0;
   private startedAt = 0;
+  /** Set when a pressured client had messages skipped. Frames only flow
+   * while a tool call runs the machine, so whatever was skipped near the
+   * end of a call would otherwise never be re-sent — the machine pauses
+   * and the view freezes on a stale frame. The heartbeat timer (which can
+   * only fire between tool calls, when the event loop is free) answers
+   * this flag by re-sending the machine's current screen. */
+  private resyncNeeded = false;
 
   constructor(opts: HubOptions) {
     this.opts = opts;
@@ -96,6 +103,7 @@ export class SpectatorHub {
         this.heartbeat = setInterval(() => {
           this.lastBeatMs = Date.now();
           this.broadcast(encodeMessage(MSG.heartbeat), "must");
+          this.maybeResync();
         }, 1000);
         this.heartbeat.unref();
         done(this.port);
@@ -176,10 +184,41 @@ export class SpectatorHub {
         // pressure just keep skipping until they catch up.
         this.prevFrame = null;
         this.prevState = "";
+        this.resyncNeeded = true;
         continue;
       }
       res.write(msg);
     }
+  }
+
+  /** Re-send the machine's current screen and state after pressure skips.
+   * Runs from the heartbeat timer, i.e. only between tool calls: the
+   * machine is paused, so one snapshot per stall converges the view. A
+   * client still above the pressure threshold skips this too — broadcast()
+   * then re-raises the flag and the next beat retries. */
+  private maybeResync(): void {
+    if (!this.resyncNeeded || this.clients.size === 0) return;
+    const snap = this.opts.snapshotFn?.();
+    if (!snap) {
+      this.resyncNeeded = false;
+      return;
+    }
+    let videoMsg: Buffer;
+    try {
+      videoMsg = encodeMessage(
+        MSG.video,
+        withFrameNo(snap.frameNo, encodePng(snap.rgba, this.width, this.height, 1)),
+      );
+    } catch (err) {
+      this.log(`spectator resync encode failed: ${err}`);
+      return;
+    }
+    const state = JSON.stringify(this.opts.stateFn());
+    this.resyncNeeded = false;
+    this.prevFrame = Buffer.from(snap.rgba);
+    this.prevState = state;
+    this.broadcast(videoMsg, "video");
+    this.broadcast(encodeMessage(MSG.state, withFrameNo(snap.frameNo, Buffer.from(state, "utf8"))));
   }
 
   /** Origin must match this server (or be absent), and Host must name this

@@ -395,3 +395,77 @@ test("spectator e2e: doremi PLAY is observable over the stream", { skip: !haveBa
   assert.ok(video.length >= 30, "video/repeat messages present (backpressure may skip some)");
   hub.close();
 });
+
+test("hub: resyncs a drained viewer to the latest frame after pressure skips", async () => {
+  // Regression: during a long tool call the event loop is blocked, a slow
+  // viewer blows past the pressure threshold and loses every later frame —
+  // including the final one. With the machine then paused, no further
+  // push() ever comes, so the view froze on a stale frame forever. The hub
+  // must re-send the current screen once the viewer drains.
+  const noise = (seed: number) => {
+    const rgba = new Uint8Array(640 * 400 * 4);
+    let x = (seed * 2654435761) >>> 0;
+    for (let i = 0; i < rgba.length; i++) {
+      x = (x * 1664525 + 1013904223) >>> 0;
+      rgba[i] = x >>> 24;
+    }
+    return rgba;
+  };
+  const LAST = 12;
+  let snap = { frameNo: 0, rgba: testRgba(0) };
+  const hub = new SpectatorHub({
+    port: 0,
+    audioRate: 44100,
+    stateFn: () => ({}),
+    snapshotFn: () => snap,
+    log: () => {},
+  });
+  const port = await hub.start();
+  assert.ok(port !== null);
+  let cb: ((frameNo: number, rgba: Uint8Array, audio: Float32Array) => void) | null = null;
+  hub.attach({ setOnFrame: (c) => (cb = c as typeof cb) });
+  const res = await fetch(`http://127.0.0.1:${port}/stream`);
+  for (let i = 0; i < 50 && cb === null; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(cb, "hook attached");
+
+  // Noise compresses terribly (~1MB of PNG per frame), so pushing without
+  // the client reading exceeds PRESSURE_SKIP_BYTES within a few frames.
+  const audio = new Float32Array(735);
+  for (let f = 1; f <= LAST; f++) cb!(f, noise(f), audio);
+  snap = { frameNo: LAST, rgba: noise(LAST) };
+
+  // Drain the stream; the resync must deliver the final frame within a few
+  // heartbeats. Without it this loop runs out the deadline.
+  const reader = new MessageReader();
+  const r = res.body!.getReader();
+  const deadline = Date.now() + 5000;
+  const videoFrames: number[] = [];
+  let gotLatest = false;
+  // One persistent pending read: racing a fresh read() per iteration would
+  // abandon resolved reads and silently drop their chunks.
+  let pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
+  while (!gotLatest && Date.now() < deadline) {
+    pending ??= r.read();
+    const chunk = await Promise.race([
+      pending,
+      new Promise<null>((done) => setTimeout(() => done(null), 250)),
+    ]);
+    if (!chunk) continue;
+    pending = null;
+    if (chunk.done) break;
+    reader.feed(Buffer.from(chunk.value));
+    for (let m = reader.next(); m; m = reader.next()) {
+      if (m.type === MSG.video || m.type === MSG.repeat) {
+        videoFrames.push(m.frameNo!);
+        if (m.frameNo === LAST) gotLatest = true;
+      }
+    }
+  }
+  await r.cancel();
+  hub.close();
+  assert.ok(
+    videoFrames.filter((f) => f > 0 && f < LAST).length < LAST - 1,
+    "pressure skipped some frames (otherwise this test proves nothing)",
+  );
+  assert.ok(gotLatest, `viewer resynced to frame ${LAST} (saw: ${videoFrames.join(",")})`);
+});
