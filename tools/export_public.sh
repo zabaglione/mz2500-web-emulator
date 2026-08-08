@@ -18,8 +18,10 @@ rsync -a --delete \
   --exclude 'tools/run_regression.sh' \
   --exclude '.gitignore' \
   --exclude '.git' \
+  --exclude 'mcp/node_modules' \
+  --exclude 'mcp/dist' \
   README.md LICENSE THIRD_PARTY_LICENSES.md CMakeLists.txt \
-  core vendor cli wasm web tools docs \
+  core vendor cli wasm web tools docs mcp \
   "$TARGET/"
 cp public/gitignore "$TARGET/.gitignore"
 mkdir -p "$TARGET/.github/workflows"

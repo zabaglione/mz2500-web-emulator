@@ -530,4 +530,86 @@ void Mz2500::render(uint8_t* rgba) const {
     }
 }
 
+namespace {
+
+// JIS X 0201 byte to UTF-8: ASCII through 7Eh (5Ch is the yen key, kept as
+// a backslash so what type_text sent comes back unchanged), A1h-DFh the
+// half-width katakana block. Everything else is a middle dot placeholder.
+size_t jisx0201_utf8(uint8_t c, char* out) {
+    if (c == 0x00 || c == 0x20) { out[0] = ' '; return 1; }
+    if (c >= 0x21 && c <= 0x7E) { out[0] = (char)c; return 1; }
+    if (c >= 0xA1 && c <= 0xDF) {
+        const uint32_t u = 0xFF61 + (c - 0xA1); // U+FF61..FF9F
+        out[0] = (char)(0xE0 | (u >> 12));
+        out[1] = (char)(0x80 | ((u >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (u & 0x3F));
+        return 3;
+    }
+    out[0] = '.';
+    return 1;
+}
+
+} // namespace
+
+size_t Mz2500::screen_text(char* buf, size_t cap) const {
+    // Same layout state as render() above: mode from PIO-A bit5, start
+    // address from CRTC regs 01h/02h (11-bit counter, wraps at the end of
+    // the Text1 plane), 20-row mode from CRTC reg 00h bit4, and the
+    // 40-column page pair from reg 00h bits 3-2. The fine roll (reg 09h)
+    // moves rasters, not cells, so a text dump ignores it.
+    const bool text80 = (pio_a_ & 0x20) != 0;
+    const int cols = text80 ? 80 : 40;
+    const bool rows20 = (crtc_regs_[0x00] & 0x10) != 0;
+    const int rows = rows20 ? 20 : 25;
+    const uint8_t* tvram = mem_.bank_ptr(0x38);
+    const int text_sa = ((crtc_regs_[2] << 8) | crtc_regs_[1]) & 0x7FF;
+    static const int PAGE_SELECT[4] = {3, 1, 2, 3}; // both, first, second, both
+    const int pages = text80 ? 1 : PAGE_SELECT[(crtc_regs_[0x00] >> 2) & 3];
+
+    // One cell to UTF-8. Kanji-ROM ANK cells decode to their character
+    // (glyph address 6000h + code*32, the inverse of the address formula in
+    // render()); kanji cells are a geta mark per half, PCG art cells a hash.
+    auto decode_cell = [&](int idx, char* out) -> size_t {
+        const uint8_t code = tvram[idx];
+        const uint8_t attr = tvram[0x800 + idx];
+        const uint8_t t2 = tvram[0x1000 + idx];
+        if (!(code | attr | t2)) { out[0] = ' '; return 1; }
+        if (attr & 0x08) { out[0] = '#'; return 1; } // colour PCG art
+        const int set = (attr >> 4) & 3;
+        if (set == 0 && (t2 & 0x80)) {
+            const uint32_t addr = ((uint32_t)(t2 & 0x40) << 11) |
+                                  ((uint32_t)(t2 & 0x3F) << 11) |
+                                  ((uint32_t)code << 3);
+            if (addr >= 0x6000 && addr < 0x8000 && (addr & 0x1F) == 0)
+                return jisx0201_utf8((uint8_t)((addr - 0x6000) >> 5), out);
+            // a kanji: one geta mark per half-width cell
+            out[0] = (char)0xE3; out[1] = (char)0x80; out[2] = (char)0x93; // 〓
+            return 3;
+        }
+        // mono PCG glyph: the code byte is whatever font the program loaded;
+        // JIS X 0201 is the best available guess
+        return jisx0201_utf8(code, out);
+    };
+
+    size_t n = 0;
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            int idx = (text_sa + r * cols + c) & 0x7FF;
+            if (pages == 2) idx = (idx ^ 0x400) & 0x7FF;
+            if (pages == 3) {
+                // both pages composed: dump the first unless it is empty
+                if (!(tvram[idx] | tvram[0x800 + idx] | tvram[0x1000 + idx]))
+                    idx = (idx ^ 0x400) & 0x7FF;
+            }
+            char tmp[4];
+            const size_t len = decode_cell(idx, tmp);
+            if (n + len + 2 > cap) { buf[n] = '\0'; return n; }
+            for (size_t i = 0; i < len; i++) buf[n++] = tmp[i];
+        }
+        buf[n++] = '\n';
+    }
+    buf[n] = '\0';
+    return n;
+}
+
 } // namespace mz

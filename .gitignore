@@ -2,3 +2,5 @@ build/
 *.wav
 *.ppm
 .DS_Store
+mcp/node_modules/
+mcp/dist/

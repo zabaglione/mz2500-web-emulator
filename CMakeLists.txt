@@ -37,7 +37,8 @@ if(EMSCRIPTEN)
   target_link_options(mz2500w PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_NAME=createMZ2500"
-    "-sENVIRONMENT=web"
+    # node is for the MCP server (mcp/), which hosts the same module headless
+    "-sENVIRONMENT=web,node"
     "-sALLOW_MEMORY_GROWTH=1"
     "-sEXPORTED_FUNCTIONS=_malloc,_free"
     "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,UTF8ToString"

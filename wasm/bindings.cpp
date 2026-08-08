@@ -171,6 +171,45 @@ EMSCRIPTEN_KEEPALIVE int emu_read_mem(int addr) {
     return g_machine ? g_machine->read_memory((uint16_t)addr) : 0;
 }
 
+// ---- MCP server observability (mcp/) ------------------------------------
+
+EMSCRIPTEN_KEEPALIVE void emu_poke(int addr, int value) {
+    if (g_machine) g_machine->poke_memory((uint16_t)addr, (uint8_t)value);
+}
+
+// Physical address space: 64 banks x 8KB, bypassing the CPU bank map.
+EMSCRIPTEN_KEEPALIVE int emu_read_phys(int phys) {
+    if (!g_machine || phys < 0 || phys >= 64 * 0x2000) return 0;
+    return g_machine->memory().bank_ptr(phys >> 13)[phys & 0x1FFF];
+}
+
+namespace {
+char g_text[8192];
+}
+
+// UTF-8 dump of the text layer (Mz2500::screen_text in renderer.cpp)
+EMSCRIPTEN_KEEPALIVE const char* emu_screen_text() {
+    if (!g_machine) return "";
+    g_machine->screen_text(g_text, sizeof(g_text));
+    return g_text;
+}
+
+// The 256-byte OPN register shadow. Pointer is stable while the machine
+// lives; re-fetch after emu_init().
+EMSCRIPTEN_KEEPALIVE const uint8_t* emu_opn_regs() {
+    return g_machine ? g_machine->opn_reg_shadow() : nullptr;
+}
+
+// FM key-on slot mask for channel 0-2 (from OPN reg 28h writes)
+EMSCRIPTEN_KEEPALIVE int emu_fm_keyon(int ch) {
+    return g_machine ? g_machine->fm_keyon(ch) : 0;
+}
+
+// BEEP speaker line (8255 port C bit2)
+EMSCRIPTEN_KEEPALIVE int emu_beep() {
+    return (g_machine && g_machine->beep_on()) ? 1 : 0;
+}
+
 // count of non-black pixels in the last rendered frame (blank-screen detector)
 EMSCRIPTEN_KEEPALIVE int emu_frame_nonblack() {
     int n = 0;

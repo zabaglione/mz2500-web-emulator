@@ -231,6 +231,19 @@ public:
     // Returns the number of bytes written (excluding the terminator).
     size_t debug_json(char* buf, size_t cap);
 
+    // Decode the text layer to UTF-8, one line per displayed row, following
+    // the same CRTC roll/page state as the renderer (renderer.cpp). Kanji-ROM
+    // ANK cells come back as their characters; kanji cells and PCG art cells
+    // as placeholders. Returns bytes written (excluding the terminator).
+    size_t screen_text(char* buf, size_t cap) const;
+
+    // Observability for external tooling (MCP server): the OPN register
+    // shadow io_out keeps, the FM key-on slot masks tracked from reg 28h
+    // writes, and the BEEP speaker line (8255 port C bit2).
+    const uint8_t* opn_reg_shadow() const { return opn_regs_; }
+    uint8_t fm_keyon(int ch) const { return fm_keyon_[ch % 3]; }
+    bool beep_on() const { return (ppi_[2] & 0x04) != 0; }
+
     // Firmware forensics: when PC first reaches `addr`, dump the recent
     // execution and I/O history to stderr (CLI --trace-trap).
     void set_trap_watch(uint16_t addr) { trap_watch_ = addr; trap_hit_ = false; }
@@ -273,6 +286,7 @@ private:
     // register latches for devices that later phases bring to life
     uint8_t opn_addr_ = 0;
     uint8_t opn_regs_[256] = {};
+    uint8_t fm_keyon_[3] = {};    // reg 28h slot masks per FM channel
     uint8_t crtc_index_ = 0;      // port F4h write
     // port F5h data (includes the graphic palette at 80h+). Register 00h
     // starts at the value every MZ-2500 IPL leaves it at - 25 rows, one text

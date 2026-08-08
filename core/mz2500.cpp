@@ -515,6 +515,10 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         return;
     case 0xC9:
         opn_regs_[opn_addr_] = value; // renderer reads the GPIO latch (reg 0Eh)
+        // Reg 28h is a command, not a latch: bits 1-0 pick the FM channel
+        // and bits 7-4 carry the slot key-on mask, so the shadow alone
+        // cannot answer "which channels are sounding". Keep that here.
+        if (opn_addr_ == 0x28 && (value & 3) != 3) fm_keyon_[value & 3] = value >> 4;
         opn_.write_data(value, cpu_.cyc);
         return;
     case 0xCC:
