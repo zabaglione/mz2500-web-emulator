@@ -44,6 +44,8 @@ public:
         return disks_[drive & 1].load(std::move(bytes));
     }
     bool insert_disk(const std::string& path) { return insert_disk(0, path); }
+    void eject_disk(int drive) { disks_[drive & 1].eject(); }
+    bool disk_loaded(int drive) const { return disks_[drive & 1].loaded(); }
 
     // Put an unformatted floppy in a drive. Every read reports record-not-
     // found until a format lays tracks down - a brand-new disk, in other

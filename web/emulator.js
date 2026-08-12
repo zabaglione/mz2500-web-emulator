@@ -1405,8 +1405,15 @@ function clampVolumeIndex(current, count) {
   return current;
 }
 
-// drive state: null or { name, volumes, current }
+const DRIVE_ORIGIN_USER = "user";
+const DRIVE_ORIGIN_NEKO_DEMO = "neko-demo";
+
+// drive state: null or { name, volumes, current, origin }
 const drives = [null, null];
+
+function isNekoDemoDisk(drive) {
+  return drives[drive]?.origin === DRIVE_ORIGIN_NEKO_DEMO;
+}
 
 // ---- persistence (IndexedDB): inserted disks survive reloads ------------
 // The connection is opened once and cached (both as a promise for callers
@@ -1659,6 +1666,11 @@ const bootModeEl = document.getElementById("boot-mode");
 bootModeEl.value = localStorage.getItem("mzw_boot_mode") || "0";
 bootModeEl.addEventListener("change", () => {
   localStorage.setItem("mzw_boot_mode", bootModeEl.value);
+  if (Number(bootModeEl.value) !== 0 && isNekoDemoDisk(0)) {
+    ejectDrive(0, { clearStored: false });
+    statusEl.textContent = "NEKO DEMO EJECTED - PRESS IPL";
+    return;
+  }
   if (Module) {
     statusEl.textContent = "BOOT MODE CHANGED - PRESS IPL";
   }
@@ -1764,7 +1776,12 @@ async function insertFile(drive, name, bytes, opts) {
   // reassigning first would let the flush snapshot the CORE's still-old
   // bytes into the NEW disk's record and name.
   await flushDiskPersist(drive);
-  drives[drive] = { name, volumes, current };
+  drives[drive] = {
+    name,
+    volumes,
+    current,
+    origin: (opts && opts.origin) || DRIVE_ORIGIN_USER,
+  };
   if (!opts || !opts.noSave) saveDriveToStore(drive, name, bytes, drives[drive].current);
   if (!Module) {
     // power still off: keep the selection, it is mounted at POWER ON
@@ -1806,6 +1823,7 @@ function persistDisk(drive) {
   const d = drives[drive];
   d.volumes[d.current].bytes = bytes;
   Module._emu_disk_clear_dirty(drive);
+  if (d.origin === DRIVE_ORIGIN_NEKO_DEMO) return;
   return saveDriveToStore(drive, d.name, concatVolumes(d.volumes), d.current);
 }
 
@@ -1841,7 +1859,12 @@ async function insertBlank(drive) {
   const size = Module._emu_disk_snapshot(drive);
   const ptr = Module._emu_disk_data();
   const bytes = Module.HEAPU8.slice(ptr, ptr + size);
-  drives[drive] = { name: "BLANK", volumes: [{ bytes, title: "BLANK" }], current: 0 };
+  drives[drive] = {
+    name: "BLANK",
+    volumes: [{ bytes, title: "BLANK" }],
+    current: 0,
+    origin: DRIVE_ORIGIN_USER,
+  };
   saveDriveToStore(drive, "BLANK", bytes, 0);
   refreshDriveUI(drive);
   refreshWpUI(drive);
@@ -1902,6 +1925,19 @@ function restartAudio() {
   workletNode.port.postMessage({ flush: 1 });
   produced = 0;
   audioT0 = audioCtx.currentTime;
+}
+
+function stopAtIplPrompt(message) {
+  stopIplWatchdog();
+  running = false;
+  restartAudio();
+  ctx2d.fillStyle = "#000";
+  ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+  lampEls[0].classList.remove("on");
+  lampEls[1].classList.remove("on");
+  fpsEl.textContent = "";
+  audioStatEl.textContent = "";
+  statusEl.textContent = message;
 }
 
 // Watchdog for the experimental real-IPL boot: if the firmware parks in a
@@ -1994,18 +2030,23 @@ async function iplBoot(options = {}) {
     Module._emu_disk_clear_dirty(drive);
   }
   const requestedBootMode = Number(bootModeEl.value);
+  // The bundled disk belongs only to the launch initiated by the NEKO
+  // convenience button. Any later front-panel IPL starts from normal media
+  // state, including another IPL in MZ-2500 mode.
+  if (isNekoDemoDisk(0) && !options.allowNekoDemo) {
+    ejectDrive(0, { clearStored: false });
+  }
   Module._emu_set_boot_mode(requestedBootMode);
   const hasIpl = Module._emu_has_ipl() !== 0;
   const hasKanji = Module._emu_has_kanji() !== 0;
   if (requestedBootMode !== 0 && (!hasIpl || !hasKanji)) {
-    statusEl.textContent = "LEGACY MODE REQUIRES MZ-2500 IPL.ROM AND KANJI.ROM";
-    return;
+    stopAtIplPrompt("LEGACY MODE REQUIRES MZ-2500 IPL.ROM AND KANJI.ROM");
+    return false;
   }
   const wantRealIpl = !options.forceDummyIpl && hasIpl &&
     (realIplEl.checked || requestedBootMode !== 0);
   if (!drives[0] && !wantRealIpl) {
-    stopIplWatchdog();
-    statusEl.textContent = "READY - NO DISK (INSERT D88, THEN PRESS IPL)";
+    stopAtIplPrompt("READY - NO DISK (INSERT D88, THEN PRESS IPL)");
     return false;
   }
   if (drives[0]) pushVolume(0);
@@ -2013,7 +2054,7 @@ async function iplBoot(options = {}) {
   const ok = wantRealIpl ? Module._emu_boot_real_ipl()
                          : (drives[0] ? Module._emu_boot() : 0);
   if (!ok) {
-    statusEl.textContent = "NOT A BOOTABLE DISK";
+    stopAtIplPrompt("NOT A BOOTABLE DISK");
     return false;
   }
   applyAdpcmHostSettings();
@@ -2058,8 +2099,9 @@ async function bootFromFile(name, bytes, opts) {
   }
   await flushDiskPersist(0);
   if (volumes.length > 1) await flushDiskPersist(1);
-  drives[0] = { name, volumes, current: 0 };
-  if (volumes.length > 1) drives[1] = { name, volumes, current: 1 };
+  const origin = (opts && opts.origin) || DRIVE_ORIGIN_USER;
+  drives[0] = { name, volumes, current: 0, origin };
+  if (volumes.length > 1) drives[1] = { name, volumes, current: 1, origin };
   if (!opts || !opts.noSave) {
     saveDriveToStore(0, name, bytes, 0);
     if (volumes.length > 1) saveDriveToStore(1, name, bytes, 1);
@@ -2161,7 +2203,12 @@ async function powerOn() {
     const bytes = new Uint8Array(saved0.buffer);
     const volumes = d88Volumes(bytes);
     if (volumes.length > 0)
-      drives[0] = { name: saved0.name, volumes, current: clampVolumeIndex(saved0.current, volumes.length) };
+      drives[0] = {
+        name: saved0.name,
+        volumes,
+        current: clampVolumeIndex(saved0.current, volumes.length),
+        origin: DRIVE_ORIGIN_USER,
+      };
   }
   await iplBoot();
 }
@@ -2204,7 +2251,12 @@ function loadNekoDemo() {
     await bootFromFile(
       "neko_can_run_demo.d88",
       new Uint8Array(await resp.arrayBuffer()),
-      { noSave: true, forceDummyIpl: true });
+      {
+        noSave: true,
+        forceDummyIpl: true,
+        allowNekoDemo: true,
+        origin: DRIVE_ORIGIN_NEKO_DEMO,
+      });
   })()
     .catch((error) => {
       console.error("NEKO demo load failed", error);
@@ -2512,6 +2564,23 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ---- drive bay ------------------------------------------------------------
+function ejectDrive(drive, options = {}) {
+  const disk = drives[drive];
+  const hadDisk = !!disk;
+  if (diskSaveTimers[drive]) {
+    clearTimeout(diskSaveTimers[drive]);
+    diskSaveTimers[drive] = null;
+  }
+  drives[drive] = null;
+  if (Module) Module._emu_disk_eject(drive);
+  const clearStored = options.clearStored !== false &&
+    (!disk || disk.origin !== DRIVE_ORIGIN_NEKO_DEMO);
+  if (clearStored) clearDriveStore(drive);
+  refreshDriveUI(drive);
+  document.getElementById(`wp${drive}`).setAttribute("aria-pressed", "false");
+  return hadDisk;
+}
+
 for (const drive of [0, 1]) {
   document.getElementById("ins" + drive).addEventListener("click", () => {
     fileEls[drive].click(); // works powered off too: the disk mounts at POWER ON
@@ -2540,29 +2609,7 @@ for (const drive of [0, 1]) {
     });
   });
   document.getElementById("eject" + drive).addEventListener("click", () => {
-    const hadDisk = !!drives[drive];
-    // Cancel any pending persist too - otherwise it fires ~1s later and
-    // writes the just-ejected disk right back into IndexedDB.
-    if (diskSaveTimers[drive]) {
-      clearTimeout(diskSaveTimers[drive]);
-      diskSaveTimers[drive] = null;
-    }
-    // Detach the drive and clear the core's dirty flag so there is nothing
-    // left for the per-frame poll (or a pagehide flush) to act on. Without
-    // this, the poll sees dirty_ still set on the very next frame, arms a
-    // fresh timer, and persistDisk() - finding drives[drive] still
-    // populated - writes the just-ejected disk straight back into
-    // IndexedDB a second later.
-    drives[drive] = null;
-    if (Module) Module._emu_disk_clear_dirty(drive);
-    clearDriveStore(drive);
-    // Bring the UI (name, volume selector, WP indicator) to the same
-    // no-disk state used for a drive that was never loaded. The core's
-    // FDC still has no "eject" entry point to tell it the media is gone
-    // (only insert/snapshot/wp/dirty exports exist), so this is JS-side
-    // bookkeeping only - see the report for details.
-    refreshDriveUI(drive);
-    document.getElementById(`wp${drive}`).setAttribute("aria-pressed", "false");
+    const hadDisk = ejectDrive(drive);
     if (hadDisk) statusEl.textContent = `FD${drive + 1}: EJECTED`;
   });
   const box = document.getElementById("ins" + drive).closest(".drive");

@@ -40,6 +40,7 @@ public:
 
     bool load_file(const std::string& path);
     bool load(std::vector<uint8_t> bytes);
+    void eject();
     bool loaded() const { return loaded_; }
 
     // A blank, never-formatted 2DD image: the 0x2B0 header with an all-zero

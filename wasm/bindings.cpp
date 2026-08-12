@@ -36,6 +36,10 @@ EMSCRIPTEN_KEEPALIVE int emu_insert_blank_disk(int drive) {
     return g_machine->insert_blank_disk(drive) ? 1 : 0;
 }
 
+EMSCRIPTEN_KEEPALIVE void emu_disk_eject(int drive) {
+    if (g_machine) g_machine->eject_disk(drive);
+}
+
 // ---- written disks: hand the image back for the browser to keep ---------
 namespace {
 std::vector<uint8_t> g_disk_out;

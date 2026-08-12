@@ -53,6 +53,15 @@ std::vector<uint8_t> D88Disk::make_unformatted() {
     return d; // track table stays all zero: every track unformatted
 }
 
+void D88Disk::eject() {
+    loaded_ = false;
+    for (int t = 0; t < TRACK_COUNT; t++) tracks_[t].sectors.clear();
+    write_protected_ = false;
+    dirty_ = false;
+    name_.assign(17, 0);
+    media_type_ = 0x10;
+}
+
 bool D88Disk::load(std::vector<uint8_t> bytes) {
     loaded_ = false;
     if (bytes.size() < HEADER_SIZE) {
@@ -65,9 +74,7 @@ bool D88Disk::load(std::vector<uint8_t> bytes) {
         // a WRITE TRACK issued after a failed insert could bring the OLD
         // disk's remaining tracks back to life inside what looks like a
         // fresh image.
-        for (int t = 0; t < TRACK_COUNT; t++) tracks_[t].sectors.clear();
-        write_protected_ = false;
-        dirty_ = false;
+        eject();
         return false;
     }
     // Disk name: offset 0x00-0x10, 17 bytes, so serialize() can hand the
