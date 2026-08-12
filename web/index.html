@@ -417,8 +417,15 @@
       <div class="panel-toggles">
         <button id="panel-detail-btn" class="panel-toggle" type="button" aria-pressed="false"
           aria-controls="cmt-deck drive-stack" data-tooltip="前面メディア部の詳細表示を切り替える">DETAIL</button>
-        <button id="neko-demo-btn" class="panel-toggle" type="button"
-          data-tooltip="2500モードへ切り替え、NEKO CAN RUNデモを起動する">NEKO</button>
+        <button id="neko-demo-btn" class="panel-toggle game-launch" type="button"
+          aria-label="Launch NEKO CAN RUN demo"
+          data-tooltip="2500モードへ切り替え、NEKO CAN RUNデモを起動する">
+          <svg class="game-launch-icon" viewBox="0 0 32 24" aria-hidden="true">
+            <path d="M9 6h14c3 0 5 2 6 5l1 5c1 3-1 5-3 5-2 0-3-1-5-4H10c-2 3-3 4-5 4-2 0-4-2-3-5l1-5c1-3 3-5 6-5Z"/>
+            <path d="M9 10v6m-3-3h6"/><circle cx="22" cy="12" r="1"/><circle cx="25" cy="15" r="1"/>
+          </svg>
+          <span class="game-launch-copy"><strong>NEKO</strong><small>GAME</small></span>
+        </button>
         <button id="tenkey-btn" class="panel-toggle" type="button" aria-pressed="false"
           data-tooltip="カーソルキーをテンキーとして送る">T.KEY</button>
         <button id="mouse-btn" class="panel-toggle" type="button" aria-pressed="false"

@@ -1344,12 +1344,22 @@ void Mz2500::dump_forensics(const char* why) {
 void Mz2500::run_frame() {
     const int this_frame_cycles = frame_cycles();
     const uint64_t end = frame_origin_ + this_frame_cycles;
+    const auto sync_frame_devices = [this]() {
+        opn_.flush_to(cpu_.cyc);
+        // Flush unconditionally so chip time stays synchronized even with the
+        // board pulled. Drop samples produced while nobody drains the ring.
+        adpcm_.flush_to(cpu_.cyc);
+        cmt_.sync(cpu_.cyc);
+        if (!adpcm_present_) adpcm_.discard_audio();
+    };
     seed_raster_lines();
     if (idle_frames_remaining_ > 0) {
-        // the real IPL ROM is "running" - burn the frame without touching RAM
+        // The real IPL ROM is "running" - burn the frame without touching RAM.
+        // Audio time must still advance because the browser uses produced
+        // samples to pace emulation while the dummy IPL holds the Z80 payload.
         idle_frames_remaining_--;
         cpu_.cyc = end;
-        cmt_.sync(cpu_.cyc);
+        sync_frame_devices();
         frame_origin_ = end;
         frames_++;
         return;
@@ -1393,14 +1403,7 @@ void Mz2500::run_frame() {
         }
         service_interrupts();
     }
-    opn_.flush_to(cpu_.cyc);
-    // flush unconditionally so chip time stays synchronized even with the
-    // board pulled - re-enabling it later needs no resync - but drop the
-    // samples it produced while nobody is draining the ring, or a
-    // --no-adpcm run grows it without bound (~4.3MB/1000 frames).
-    adpcm_.flush_to(cpu_.cyc);
-    cmt_.sync(cpu_.cyc);
-    if (!adpcm_present_) adpcm_.discard_audio();
+    sync_frame_devices();
     frame_origin_ = end;
     frames_++;
 }

@@ -22,6 +22,11 @@
 namespace mz {
 
 void Mz2500::reset_peripherals_for_boot() {
+    // IPL starts a new machine-time epoch. Establish it before any device
+    // reset calls update_ppi_outputs(), which flushes the OPN to cpu_.cyc.
+    // Leaving the previous session's cycle count here made a freshly reset
+    // OPN regenerate that entire elapsed interval as stale audio.
+    cpu_.cyc = 0;
     fdc_.reset();
     opn_.reset();
     update_boot_sense_inputs();

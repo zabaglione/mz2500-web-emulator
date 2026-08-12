@@ -12,11 +12,11 @@
 <meta property="og:description" content="D88をブラウザ内に保存して使えるMZ-2500エミュレータ。同梱のNEKO CAN RUNデモも選択して起動できます。">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2216%22 fill=%22%23101214%22/><path fill=%22%23d3b25c%22 d=%22M15 75V25h15l20 25 20-25h15v50H70V48L50 72 30 48v27z%22/></svg>">
-<link rel="stylesheet" href="style.css?v=20260812183051">
+<link rel="stylesheet" href="style.css?v=20260812194702">
 </head>
 <body>
 <main>
-  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD 20260812183051</span></h1>
+  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD 20260812194702</span></h1>
   <div id="layout">
   <aside id="left-pane">
   <details id="help-config" class="help-menu">
@@ -417,8 +417,15 @@
       <div class="panel-toggles">
         <button id="panel-detail-btn" class="panel-toggle" type="button" aria-pressed="false"
           aria-controls="cmt-deck drive-stack" data-tooltip="前面メディア部の詳細表示を切り替える">DETAIL</button>
-        <button id="neko-demo-btn" class="panel-toggle" type="button"
-          data-tooltip="2500モードへ切り替え、NEKO CAN RUNデモを起動する">NEKO</button>
+        <button id="neko-demo-btn" class="panel-toggle game-launch" type="button"
+          aria-label="Launch NEKO CAN RUN demo"
+          data-tooltip="2500モードへ切り替え、NEKO CAN RUNデモを起動する">
+          <svg class="game-launch-icon" viewBox="0 0 32 24" aria-hidden="true">
+            <path d="M9 6h14c3 0 5 2 6 5l1 5c1 3-1 5-3 5-2 0-3-1-5-4H10c-2 3-3 4-5 4-2 0-4-2-3-5l1-5c1-3 3-5 6-5Z"/>
+            <path d="M9 10v6m-3-3h6"/><circle cx="22" cy="12" r="1"/><circle cx="25" cy="15" r="1"/>
+          </svg>
+          <span class="game-launch-copy"><strong>NEKO</strong><small>GAME</small></span>
+        </button>
         <button id="tenkey-btn" class="panel-toggle" type="button" aria-pressed="false"
           data-tooltip="カーソルキーをテンキーとして送る">T.KEY</button>
         <button id="mouse-btn" class="panel-toggle" type="button" aria-pressed="false"
@@ -507,8 +514,8 @@
   </aside>
   </div>
 </main>
-<script>window.BUILD_ID = "20260812183051";</script>
-<script src="mz2500w.js?v=20260812183051"></script>
-<script src="emulator.js?v=20260812183051"></script>
+<script>window.BUILD_ID = "20260812194702";</script>
+<script src="mz2500w.js?v=20260812194702"></script>
+<script src="emulator.js?v=20260812194702"></script>
 </body>
 </html>
