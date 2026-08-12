@@ -47,8 +47,12 @@ void Mz2500::reset_peripherals_for_boot() {
     pio_a_ = 0;
     std::memset(pio_ctrl_, 0, sizeof(pio_ctrl_));
     std::memset(ppi_, 0, sizeof(ppi_));
-    ppi_control_ = 0x9B; // 8255 reset: all ports input
+    // The firmware's no-media CMT path sends STOP/PLAY through port A
+    // without first writing a mode-set word. Start the IPL-visible recorder
+    // wiring in its normal configuration: A/C output and B input.
+    ppi_control_ = 0x82;
     cmt_.reset(0);       // media and head position survive RESET; motor stops
+    update_ppi_outputs();
     printer_.reset(0);   // external output already accepted survives RESET
     sasi_.reset_machine(); // target media and option ROM survive RESET
     bank_mode_ = 0;
@@ -185,9 +189,10 @@ bool Mz2500::boot_with_real_ipl() {
     reset_peripherals_for_boot();
 
     // Do not pre-apply values observed at the end of firmware startup here.
-    // CRTC 00h=05h, F6h=07h, 8255=82h, and OPN 07h/0Eh are firmware handoff
-    // state. A real-ROM boot starts from the neutral device baseline above
-    // and lets the ROM perform those writes in emulated time.
+    // CRTC 00h=05h, F6h=07h, and OPN 07h/0Eh are firmware handoff state.
+    // The recorder PPI's 82h boot baseline is the exception: the real IPL's
+    // no-media path sends its STOP/PLAY sequence before any PPI mode-set.
+    // Every later value is still established by the ROM in emulated time.
     // MZ-1M10 palette RAM is not on the CPU RESET line. Keep both its bytes
     // and the fact that it has been programmed; the real IPL may overwrite
     // the table, but the machine core must not do that before the ROM runs.

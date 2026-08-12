@@ -134,6 +134,8 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
   --cmt-face: #484b4c;
   --cmt-line: #777a78;
   grid-area: cmt;
+  position: relative;
+  z-index: 3;
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr) 96px;
   min-width: 0;
@@ -142,7 +144,8 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
   background: var(--cmt-face);
   border: 1px solid #777a79;
   box-shadow: inset 0 0 0 1px #272a2b;
-  overflow: hidden;
+  /* Tooltips must be able to escape the physical panel boundary. */
+  overflow: visible;
 }
 
 .cmt-utility-strip {
@@ -675,6 +678,144 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
   box-shadow: inset 0 1px 2px #682a28;
 }
 
+/* The compact front keeps every operational control, but folds the media
+   hardware into a single shallow row. DETAIL removes this class and exposes
+   the full physical front-panel treatment above. */
+#drivebay.compact {
+  grid-template-columns: minmax(300px, 1.15fr) minmax(290px, 1fr);
+}
+
+#drivebay.compact #cmt-deck {
+  grid-template-columns: minmax(0, 1fr) 150px;
+  height: 112px;
+}
+
+#drivebay.compact .cmt-utility-strip { display: none; }
+
+#drivebay.compact .cmt-cassette-bay {
+  grid-template-rows: minmax(0, 1fr) 12px 22px;
+  gap: 2px;
+  padding: 5px;
+}
+
+#drivebay.compact .cmt-cassette-shell {
+  top: 47%;
+  width: min(90%, 210px);
+  height: 52px;
+}
+
+#drivebay.compact .cmt-reel {
+  top: 7px;
+  width: 27px;
+  height: 27px;
+  border-width: 2px;
+}
+
+#drivebay.compact .cmt-tape-path {
+  top: 19px;
+  height: 5px;
+}
+
+#drivebay.compact .cmt-cassette-label { display: none; }
+#drivebay.compact .cmt-media-name { bottom: 4px; font-size: 6px; }
+#drivebay.compact #cmt-state { font-size: 6px; line-height: 12px; }
+#drivebay.compact .cmt-media-actions { gap: 2px; }
+#drivebay.compact .cmt-media-button { width: 22px; height: 20px; }
+#drivebay.compact .cmt-media-button svg { width: 13px; height: 13px; }
+
+#drivebay.compact .cmt-transport-panel {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: 31px repeat(2, minmax(0, 1fr));
+}
+
+#drivebay.compact .cmt-counter-block {
+  grid-column: 1 / -1;
+  grid-template-columns: 43px minmax(0, 1fr) 18px;
+  grid-template-rows: 1fr;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px;
+  font-size: 6px;
+}
+
+#drivebay.compact .cmt-counter {
+  grid-column: 2;
+  grid-row: 1;
+  padding: 1px 2px;
+  font-size: 12px;
+}
+
+#drivebay.compact .cmt-counter-reset {
+  grid-column: 3;
+  grid-row: 1;
+  width: 16px;
+  height: 21px;
+}
+
+#drivebay.compact .cmt-transport-row {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 9px minmax(0, 1fr);
+  gap: 1px;
+  padding: 1px 3px 2px;
+}
+
+#drivebay.compact .cmt-transport-label {
+  grid-column: 1;
+  grid-row: 1;
+  font-size: 6px;
+}
+
+#drivebay.compact .cmt-transport-label small { font-size: 5px; }
+#drivebay.compact .cmt-transport-led {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  width: 7px;
+  height: 5px;
+}
+
+#drivebay.compact .cmt-transport-key,
+#drivebay.compact .cmt-eject-row .cmt-transport-key,
+#drivebay.compact .cmt-transport-row.no-led .cmt-transport-key {
+  grid-column: 1;
+  grid-row: 2;
+  height: 13px;
+}
+
+#drivebay.compact .drive-stack {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+#drivebay.compact .drive {
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 3px;
+  min-height: 112px;
+  padding: 3px;
+}
+
+#drivebay.compact .drive-ident { gap: 2px; }
+#drivebay.compact .dlabel { font-size: 8px; }
+#drivebay.compact .drive-slot {
+  min-height: 53px;
+  padding: 3px 4px;
+  border-width: 1px;
+}
+
+#drivebay.compact .disk-meta { gap: 2px; }
+#drivebay.compact .disk-row {
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 3px;
+}
+
+#drivebay.compact .disk-key { font-size: 6px; }
+#drivebay.compact .disk-value { font-size: 7px; }
+#drivebay.compact .volsel { min-width: 46px; max-width: 44%; font-size: 7px; }
+#drivebay.compact .drive-actions { gap: 2px; justify-content: center; }
+#drivebay.compact .icon-btn { width: 22px; height: 23px; }
+#drivebay.compact .icon-btn svg { width: 13px; height: 13px; }
+
 .pocket-panel {
   grid-area: pocket;
   justify-self: center;
@@ -726,7 +867,7 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
   grid-column: 1 / 3;
   grid-row: 2;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
 }
 
@@ -777,7 +918,7 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
 [data-tooltip] { position: relative; }
 [data-tooltip]::after {
   content: attr(data-tooltip);
-  display: none;
+  display: block;
   position: absolute;
   z-index: 80;
   left: 50%;
@@ -795,12 +936,26 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
   white-space: normal;
   pointer-events: none;
   transform: translate(-50%, 0);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 80ms linear, visibility 0s linear 80ms;
 }
 
 [data-tooltip]:hover::after,
-[data-tooltip]:focus-visible::after,
-[data-tooltip]:focus-within::after {
-  display: block;
+[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 2s, 2s;
+}
+
+@media (min-width: 721px) {
+  /* Keep tooltips for the narrow left strip inside the viewport instead of
+     centering half of their width beyond the cabinet's left edge. */
+  #cmt-deck .cmt-utility-strip [data-tooltip]::after {
+    left: 4px;
+    right: auto;
+    transform: none;
+  }
 }
 
 #statusbar {
@@ -1095,6 +1250,7 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
     grid-template-areas: "cmt" "drives" "pocket";
     padding: 7px;
   }
+  #drivebay.compact { grid-template-columns: minmax(0, 1fr); }
   .drive-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pocket-panel { min-height: 112px; grid-template-columns: 64px minmax(82px, 1fr) 102px; }
   .drive { grid-template-columns: 30px minmax(0, 1fr); gap: 4px; padding: 4px; }
@@ -1115,6 +1271,7 @@ h1 .build { color: #747a7c; font-size: 11px; font-weight: normal; letter-spacing
 
 @media (max-width: 520px) {
   .drive-stack { grid-template-columns: minmax(0, 1fr); }
+  #drivebay.compact .drive-stack { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 440px) {

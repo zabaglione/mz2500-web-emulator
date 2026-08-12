@@ -16,6 +16,9 @@ public:
     void reset(uint64_t now = 0);
     void set_mz80b_mode(bool enabled) { mz80b_mode_ = enabled; }
     bool load_wav(const uint8_t* data, size_t size);
+    // Load a standard MZF logical tape image (also used by MZT/M12) and turn
+    // its header/data records into comparator pulses.
+    bool load_mzf(const uint8_t* data, size_t size, bool mz80b_mode = false);
     bool create_blank(uint32_t seconds, uint32_t sample_rate = 44100);
     void eject();
 

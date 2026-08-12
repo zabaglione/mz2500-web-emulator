@@ -92,6 +92,11 @@ EMSCRIPTEN_KEEPALIVE int emu_cmt_insert_wav(const uint8_t* data, int size) {
             g_machine->insert_cmt_wav(data, static_cast<size_t>(size))) ? 1 : 0;
 }
 
+EMSCRIPTEN_KEEPALIVE int emu_cmt_insert_mzf(const uint8_t* data, int size) {
+    return (g_machine && data && size > 0 &&
+            g_machine->insert_cmt_mzf(data, static_cast<size_t>(size))) ? 1 : 0;
+}
+
 EMSCRIPTEN_KEEPALIVE int emu_cmt_create_blank(int seconds) {
     return (g_machine && seconds > 0 &&
             g_machine->create_blank_cmt(static_cast<uint32_t>(seconds))) ? 1 : 0;

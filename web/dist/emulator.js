@@ -122,6 +122,23 @@ const diskTitleEls = [document.getElementById("dtitle0"), document.getElementByI
 const volEls = [document.getElementById("vol0"), document.getElementById("vol1")];
 const fileEls = [document.getElementById("file0"), document.getElementById("file1")];
 const masterVolumeEl = document.getElementById("master-volume");
+const driveBayEl = document.getElementById("drivebay");
+const panelDetailBtn = document.getElementById("panel-detail-btn");
+const nekoDemoBtn = document.getElementById("neko-demo-btn");
+
+let panelDetailed = localStorage.getItem("mzw_panel_detail") === "1";
+
+function refreshPanelDetail() {
+  driveBayEl.classList.toggle("compact", !panelDetailed);
+  panelDetailBtn.setAttribute("aria-pressed", panelDetailed ? "true" : "false");
+}
+
+panelDetailBtn.addEventListener("click", () => {
+  panelDetailed = !panelDetailed;
+  localStorage.setItem("mzw_panel_detail", panelDetailed ? "1" : "0");
+  refreshPanelDetail();
+});
+refreshPanelDetail();
 
 let Module = null;
 let audioCtx = null;
@@ -659,8 +676,8 @@ if ("serial" in navigator) {
 updateSioUi();
 
 // ---- built-in CMT data recorder -----------------------------------------
-// WAV is deliberately the only interchange format: the core consumes the
-// actual comparator waveform, so turbo/custom loaders retain their timing.
+// WAV keeps arbitrary/custom pulse timing. Standard MZ logical images are
+// expanded to their machine-specific comparator waveform by the core.
 const cmtStateEl = document.getElementById("cmt-state");
 const cmtProgressEl = document.getElementById("cmt-progress");
 const cmtLoadEl = document.getElementById("cmt-load");
@@ -684,7 +701,7 @@ const cmtLedEls = {
   rec: document.getElementById("cmt-led-rec"),
 };
 
-let cmtMedia = null; // { name, bytes, wp, inserted }
+let cmtMedia = null; // { name, bytes, kind: "wav"|"mzf", wp, inserted }
 let cmtSaveTimer = null;
 let cmtUiSignature = "";
 let cmtCounterZeroMs = 0;
@@ -710,13 +727,33 @@ function cmtSnapshot() {
   return Module.HEAPU8.slice(ptr, ptr + size);
 }
 
+function isWavTape(bytes) {
+  return bytes && bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x41 && bytes[10] === 0x56 && bytes[11] === 0x45;
+}
+
+function detectTapeKind(bytes) {
+  return isWavTape(bytes) ? "wav" : "mzf";
+}
+
+function wavTapeName(name) {
+  const source = name || "tape";
+  const base = source.replace(/\.(?:wav|mzt|mzf|m12)$/i, "");
+  return `${base || "tape"}.wav`;
+}
+
 function mountCmtMedia() {
   if (!Module || !cmtMedia || !cmtMedia.bytes.length) return false;
+  const kind = detectTapeKind(cmtMedia.bytes);
   const ptr = Module._malloc(cmtMedia.bytes.length);
   Module.HEAPU8.set(cmtMedia.bytes, ptr);
-  const ok = Module._emu_cmt_insert_wav(ptr, cmtMedia.bytes.length) !== 0;
+  const ok = kind === "wav"
+    ? Module._emu_cmt_insert_wav(ptr, cmtMedia.bytes.length) !== 0
+    : Module._emu_cmt_insert_mzf(ptr, cmtMedia.bytes.length) !== 0;
   Module._free(ptr);
   if (!ok) return false;
+  cmtMedia.kind = kind;
   cmtMedia.inserted = true;
   Module._emu_cmt_set_wp(cmtMedia.wp ? 1 : 0);
   saveCmtToStore(cmtMedia);
@@ -726,8 +763,15 @@ function mountCmtMedia() {
 
 function persistCmt() {
   if (!Module || !cmtMedia) return;
-  const bytes = cmtSnapshot();
-  if (bytes) cmtMedia.bytes = bytes;
+  const dirty = Module._emu_cmt_dirty() !== 0;
+  if (dirty || cmtMedia.kind === "wav") {
+    const bytes = cmtSnapshot();
+    if (bytes) {
+      cmtMedia.bytes = bytes;
+      cmtMedia.kind = "wav";
+      cmtMedia.name = wavTapeName(cmtMedia.name);
+    }
+  }
   cmtMedia.wp = Module._emu_cmt_wp() !== 0;
   cmtMedia.inserted = Module._emu_cmt_loaded() !== 0;
   Module._emu_cmt_clear_dirty();
@@ -799,13 +843,14 @@ cmtFileEl.addEventListener("change", async () => {
   const file = cmtFileEl.files[0];
   cmtFileEl.value = "";
   if (!file) return;
-  const candidate = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()),
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const candidate = { name: file.name, bytes, kind: detectTapeKind(bytes),
                       wp: true, inserted: true };
   const previous = cmtMedia;
   cmtMedia = candidate;
   if (Module && !mountCmtMedia()) {
     cmtMedia = previous;
-    statusEl.textContent = "CMT: UNSUPPORTED WAV";
+    statusEl.textContent = "CMT: UNSUPPORTED TAPE IMAGE";
     return;
   }
   cmtCounterZeroMs = 0;
@@ -827,7 +872,8 @@ cmtNewEl.addEventListener("click", async () => {
     statusEl.textContent = "CMT: CANNOT CREATE TAPE";
     return;
   }
-  cmtMedia = { name: "blank-tape.wav", bytes: cmtSnapshot(), wp: false, inserted: true };
+  cmtMedia = { name: "blank-tape.wav", bytes: cmtSnapshot(), kind: "wav",
+               wp: false, inserted: true };
   cmtCounterZeroMs = 0;
   await saveCmtToStore(cmtMedia);
   refreshCmtUi();
@@ -876,10 +922,13 @@ cmtRecEl.addEventListener("click", () => {
 cmtSaveEl.addEventListener("click", async () => {
   await flushCmtPersist();
   if (!cmtMedia) return;
-  const url = URL.createObjectURL(new Blob([cmtMedia.bytes], { type: "audio/wav" }));
+  const isWav = cmtMedia.kind === "wav";
+  const url = URL.createObjectURL(new Blob([cmtMedia.bytes], {
+    type: isWav ? "audio/wav" : "application/octet-stream",
+  }));
   const a = document.createElement("a");
   a.href = url;
-  a.download = /\.wav$/i.test(cmtMedia.name) ? cmtMedia.name : `${cmtMedia.name}.wav`;
+  a.download = isWav ? wavTapeName(cmtMedia.name) : cmtMedia.name;
   a.click();
   URL.revokeObjectURL(url);
 });
@@ -1471,6 +1520,7 @@ function putCmtRecordSync(media) {
     dbConn.transaction("cmt", "readwrite").objectStore("cmt").put({
       name: media.name,
       buffer: media.bytes.slice().buffer,
+      kind: media.kind || detectTapeKind(media.bytes),
       wp: !!media.wp,
       inserted: !!media.inserted,
     }, "tape");
@@ -1916,7 +1966,7 @@ function startIplWatchdog() {
   iplWatchTimer = setInterval(checkRealIplStall, 1000);
 }
 
-async function iplBoot() {
+async function iplBoot(options = {}) {
   if (!Module) return;
   // Land any write still sitting in the persist debounce BEFORE reloading -
   // pushVolume() -> _emu_insert_disk -> D88Disk::load() clears the core's
@@ -1951,15 +2001,20 @@ async function iplBoot() {
     statusEl.textContent = "LEGACY MODE REQUIRES MZ-2500 IPL.ROM AND KANJI.ROM";
     return;
   }
-  const wantRealIpl = hasIpl && (realIplEl.checked || requestedBootMode !== 0);
-  if (!drives[0] && !wantRealIpl) return;
+  const wantRealIpl = !options.forceDummyIpl && hasIpl &&
+    (realIplEl.checked || requestedBootMode !== 0);
+  if (!drives[0] && !wantRealIpl) {
+    stopIplWatchdog();
+    statusEl.textContent = "READY - NO DISK (INSERT D88, THEN PRESS IPL)";
+    return false;
+  }
   if (drives[0]) pushVolume(0);
   if (drives[1]) pushVolume(1);
   const ok = wantRealIpl ? Module._emu_boot_real_ipl()
                          : (drives[0] ? Module._emu_boot() : 0);
   if (!ok) {
     statusEl.textContent = "NOT A BOOTABLE DISK";
-    return;
+    return false;
   }
   applyAdpcmHostSettings();
   sioAppliedModem = [null, null];
@@ -1977,6 +2032,7 @@ async function iplBoot() {
     fpsWindowStart = performance.now();
     requestAnimationFrame(tick);
   }
+  return true;
 }
 
 // canvas drop / initial load: mount into FD1 (volume 2 goes to FD2) and boot
@@ -2008,7 +2064,7 @@ async function bootFromFile(name, bytes, opts) {
     saveDriveToStore(0, name, bytes, 0);
     if (volumes.length > 1) saveDriveToStore(1, name, bytes, 1);
   }
-  await iplBoot();
+  await iplBoot(opts);
 }
 
 async function powerOn() {
@@ -2062,13 +2118,14 @@ async function powerOn() {
       cmtMedia = {
         name: savedCmt.name || "tape.wav",
         bytes: new Uint8Array(savedCmt.buffer),
+        kind: savedCmt.kind || detectTapeKind(new Uint8Array(savedCmt.buffer)),
         wp: !!savedCmt.wp,
         inserted: savedCmt.inserted !== false,
       };
     }
   }
   if (cmtMedia && cmtMedia.inserted && !mountCmtMedia())
-    statusEl.textContent = "CMT: STORED WAV IS INVALID";
+    statusEl.textContent = "CMT: STORED TAPE IMAGE IS INVALID";
   refreshCmtUi();
   if (!sasiMedia) {
     const savedSasi = await loadSasiFromStore();
@@ -2089,9 +2146,9 @@ async function powerOn() {
     statusEl.textContent = "SASI: STORED IMAGE IS INVALID";
   refreshSasiUi();
 
-  // restore disks saved in this browser (IndexedDB); FD1 boots in place of
-  // the bundled demo, FD2 is remounted alongside. Disks chosen while the
-  // power was still off are already in drives[] and take precedence.
+  // Restore user-selected disks saved in this browser (IndexedDB). Disks
+  // chosen while the power was still off are already in drives[] and take
+  // precedence. Bundled media is never inserted by this path.
   const saved0 = await loadDriveFromStore(0);
   const saved1 = await loadDriveFromStore(1);
   if (drives[1]) {
@@ -2106,19 +2163,59 @@ async function powerOn() {
     if (volumes.length > 0)
       drives[0] = { name: saved0.name, volumes, current: clampVolumeIndex(saved0.current, volumes.length) };
   }
-  if (drives[0]) {
-    iplBoot();
-    return;
-  }
+  await iplBoot();
+}
 
-  const resp = await fetch("neko_can_run_demo.d88?v=" + v);
-  if (!resp.ok) {
-    statusEl.textContent = "DISK FETCH FAILED";
-    return;
-  }
-  // the bundled demo is not persisted; only user-inserted disks are
-  await bootFromFile("neko_can_run_demo.d88", new Uint8Array(await resp.arrayBuffer()),
-                      { noSave: true });
+let powerOnPromise = null;
+let nekoDemoPromise = null;
+
+function ensurePowerOn() {
+  if (powerOnPromise) return powerOnPromise;
+  if (Module) return Promise.resolve();
+  powerOnPromise = powerOn()
+    .catch((error) => {
+      console.error("Power-on failed", error);
+      statusEl.textContent = "POWER ON FAILED";
+      throw error;
+    })
+    .finally(() => { powerOnPromise = null; });
+  return powerOnPromise;
+}
+
+function loadNekoDemo() {
+  if (nekoDemoPromise) return nekoDemoPromise;
+  nekoDemoBtn.disabled = true;
+  nekoDemoBtn.setAttribute("aria-busy", "true");
+
+  // This is an explicit MZ-2500 demo action, so make the mode switch visible
+  // and persistent. The one-shot dummy-IPL option keeps the demo independent
+  // of an optional real IPL setting without changing that advanced setting.
+  bootModeEl.value = "0";
+  localStorage.setItem("mzw_boot_mode", "0");
+
+  nekoDemoPromise = (async () => {
+    await ensurePowerOn();
+    if (!Module) return;
+    Module._emu_set_boot_mode(0);
+    statusEl.textContent = "LOADING NEKO CAN RUN DEMO...";
+    const v = encodeURIComponent(window.BUILD_ID || "dev");
+    const resp = await fetch("neko_can_run_demo.d88?v=" + v);
+    if (!resp.ok) throw new Error(`Demo disk fetch failed: ${resp.status}`);
+    await bootFromFile(
+      "neko_can_run_demo.d88",
+      new Uint8Array(await resp.arrayBuffer()),
+      { noSave: true, forceDummyIpl: true });
+  })()
+    .catch((error) => {
+      console.error("NEKO demo load failed", error);
+      statusEl.textContent = "NEKO DEMO LOAD FAILED";
+    })
+    .finally(() => {
+      nekoDemoBtn.disabled = false;
+      nekoDemoBtn.removeAttribute("aria-busy");
+      nekoDemoPromise = null;
+    });
+  return nekoDemoPromise;
 }
 
 function pumpAudio() {
@@ -2516,7 +2613,10 @@ wrap.addEventListener("drop", async (e) => {
   await bootFromFile(file.name, new Uint8Array(await file.arrayBuffer()));
 });
 
-document.getElementById("power").addEventListener("click", powerOn);
+document.getElementById("power").addEventListener("click", () => {
+  ensurePowerOn().catch(() => {});
+});
+nekoDemoBtn.addEventListener("click", loadNekoDemo);
 
 // ---- debug panel ----------------------------------------------------------
 const debugToggle = document.getElementById("debug-toggle");
@@ -2587,6 +2687,67 @@ let mouseEnabled = localStorage.getItem("mzw_mouse_on") !== "0";
 // fractional remainder, so slow movement is not rounded away
 let mouseFracX = 0;
 let mouseFracY = 0;
+const CONTEXT_MENU_CLICK_MS = 120;
+const CONTEXT_MENU_DUPLICATE_MS = 500;
+const deliveredMouseButtons = [false, false];
+let hostPrimaryDown = false;
+let hostPhysicalSecondaryDown = false;
+let hostContextSecondaryDown = false;
+let contextPrimaryCandidate = null;
+let contextPrimaryHoldsSecondary = false;
+let contextSecondaryReleaseTimer = 0;
+let lastPhysicalSecondaryEventAt = -Infinity;
+
+function deliverMouseButton(index, down) {
+  if (deliveredMouseButtons[index] === down) return;
+  deliveredMouseButtons[index] = down;
+  if (Module && running) Module._emu_mouse_button(index, down ? 1 : 0);
+}
+
+function syncHostMouseButtons() {
+  deliverMouseButton(0, hostPrimaryDown);
+  deliverMouseButton(1, hostPhysicalSecondaryDown || hostContextSecondaryDown);
+}
+
+function clearContextPrimaryCandidate() {
+  if (!contextPrimaryCandidate) return;
+  if (contextPrimaryCandidate.timer) clearTimeout(contextPrimaryCandidate.timer);
+  contextPrimaryCandidate = null;
+}
+
+function releaseContextSecondaryLater() {
+  if (contextSecondaryReleaseTimer) clearTimeout(contextSecondaryReleaseTimer);
+  contextSecondaryReleaseTimer = setTimeout(() => {
+    contextSecondaryReleaseTimer = 0;
+    hostContextSecondaryDown = false;
+    syncHostMouseButtons();
+  }, CONTEXT_MENU_CLICK_MS);
+}
+
+function clickMouseButton(index) {
+  if (index === 0) hostPrimaryDown = true;
+  else hostContextSecondaryDown = true;
+  syncHostMouseButtons();
+  if (index === 0) {
+    setTimeout(() => {
+      hostPrimaryDown = false;
+      syncHostMouseButtons();
+    }, CONTEXT_MENU_CLICK_MS);
+  } else {
+    releaseContextSecondaryLater();
+  }
+}
+
+function releaseHostMouseButtons() {
+  clearContextPrimaryCandidate();
+  if (contextSecondaryReleaseTimer) clearTimeout(contextSecondaryReleaseTimer);
+  contextSecondaryReleaseTimer = 0;
+  contextPrimaryHoldsSecondary = false;
+  hostPrimaryDown = false;
+  hostPhysicalSecondaryDown = false;
+  hostContextSecondaryDown = false;
+  syncHostMouseButtons();
+}
 
 function refreshMouseUI() {
   mouseSensEl.value = String(Math.round(mouseSens * 10));
@@ -2634,26 +2795,85 @@ for (const type of ["mousedown", "mouseup"]) {
     // MZ button 2 and left the right button, the one users actually reach
     // for, doing nothing. Anything else (middle, back/forward) is not wired
     // to anything.
-    let mzButton;
-    if (e.button === 0) mzButton = 0;
-    else if (e.button === 2) mzButton = 1;
-    else return;
+    if (e.button === 0 && type === "mousedown" && e.ctrlKey) {
+      // Some platforms turn Ctrl+primary into a context-menu gesture. Hold
+      // this primary event briefly and let the contextmenu event make the
+      // decision; if no contextmenu follows, it remains a normal click.
+      clearContextPrimaryCandidate();
+      contextPrimaryCandidate = { released: false, timer: 0 };
+      e.preventDefault();
+      return;
+    }
+
+    if (e.button === 0 && type === "mouseup" && contextPrimaryHoldsSecondary) {
+      contextPrimaryHoldsSecondary = false;
+      hostContextSecondaryDown = false;
+      syncHostMouseButtons();
+      e.preventDefault();
+      return;
+    }
+
+    if (e.button === 0 && type === "mouseup" && contextPrimaryCandidate) {
+      const candidate = contextPrimaryCandidate;
+      candidate.released = true;
+      candidate.timer = setTimeout(() => {
+        if (contextPrimaryCandidate !== candidate) return;
+        contextPrimaryCandidate = null;
+        clickMouseButton(0);
+      }, CONTEXT_MENU_CLICK_MS);
+      e.preventDefault();
+      return;
+    }
+
+    if (e.button === 0) {
+      hostPrimaryDown = type === "mousedown";
+    } else if (e.button === 2) {
+      hostPhysicalSecondaryDown = type === "mousedown";
+      lastPhysicalSecondaryEventAt = performance.now();
+    } else {
+      return;
+    }
     e.preventDefault();
-    Module._emu_mouse_button(mzButton, type === "mousedown" ? 1 : 0);
+    syncHostMouseButtons();
   });
 }
 
-// The right mouse button now drives MZ button 2 while the pointer is
-// locked to the screen, so its native context menu must not pop up over the
-// emulator - a right-click there should reach the machine, not the browser.
+// Treat the platform's semantic context-menu gesture as MZ button 2. This
+// covers trackpad gestures and accessibility mappings that do not expose a
+// physical button 2. A physical right-click also emits contextmenu on many
+// browsers, so the recent-event guard prevents a duplicate click.
 document.addEventListener("contextmenu", (e) => {
-  if (document.pointerLockElement === canvas) e.preventDefault();
+  if (document.pointerLockElement !== canvas) return;
+  e.preventDefault();
+  if (!Module || !running) return;
+
+  if (contextPrimaryCandidate) {
+    const released = contextPrimaryCandidate.released;
+    clearContextPrimaryCandidate();
+    hostContextSecondaryDown = true;
+    syncHostMouseButtons();
+    if (released) releaseContextSecondaryLater();
+    else contextPrimaryHoldsSecondary = true;
+    return;
+  }
+
+  if (hostPhysicalSecondaryDown ||
+      performance.now() - lastPhysicalSecondaryEventAt < CONTEXT_MENU_DUPLICATE_MS) return;
+
+  // If a browser reports an unusual primary-button context gesture without
+  // Ctrl, undo the primary state before delivering the semantic secondary.
+  if (hostPrimaryDown && (e.button === 0 || e.ctrlKey)) hostPrimaryDown = false;
+  hostContextSecondaryDown = true;
+  syncHostMouseButtons();
+  releaseContextSecondaryLater();
 });
 
 document.addEventListener("pointerlockchange", () => {
+  releaseHostMouseButtons();
   mouseBtn.setAttribute("aria-pressed",
     document.pointerLockElement === canvas ? "true" : String(mouseEnabled));
 });
+window.addEventListener("blur", releaseHostMouseButtons);
 
 // ---- on-screen keyboard ----------------------------------------------------
 // A real MZ-2500 keyboard has eleven keys no PC keyboard has a place for -

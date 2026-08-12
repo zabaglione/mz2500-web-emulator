@@ -181,11 +181,14 @@ public:
     void set_boot_delay_frames(int frames) { boot_delay_frames_ = frames; }
     FdcMb8877& fdc() { return fdc_; }
 
-    // Built-in data recorder. WAV is the interchange format because it
-    // preserves loaders that use their own pulse widths instead of assuming
-    // one logical cassette-file encoding.
+    // Built-in data recorder. WAV preserves arbitrary pulse widths; standard
+    // MZ logical images are encoded into the corresponding MZ-2000/MZ-80B
+    // comparator waveform when inserted.
     bool insert_cmt_wav(const uint8_t* data, size_t size) {
         return cmt_.load_wav(data, size);
+    }
+    bool insert_cmt_mzf(const uint8_t* data, size_t size) {
+        return cmt_.load_mzf(data, size, boot_mode_ == 2);
     }
     bool create_blank_cmt(uint32_t seconds) { return cmt_.create_blank(seconds, 22050); }
     void eject_cmt() { cmt_.eject(); }
@@ -437,8 +440,9 @@ public:
 
 private:
     // Reset CPU-external device state shared by both boot paths. Firmware
-    // handoff values belong in boot_from_disk(), after this neutral baseline;
-    // boot_with_real_ipl() must let the ROM establish them itself.
+    // handoff values belong in boot_from_disk(), after this boot baseline;
+    // boot_with_real_ipl() must let the ROM establish them itself, except for
+    // the recorder PPI wiring needed by the IPL's pre-mode-set CMT path.
     void reset_peripherals_for_boot();
     static uint8_t cb_read(void* ud, uint16_t addr);
     static void cb_write(void* ud, uint16_t addr, uint8_t value);
@@ -464,6 +468,7 @@ private:
     void gvram_rmw_write(int bank, uint16_t off, uint8_t value);
     uint8_t gvram_rmw_read(int bank, uint16_t off);
     void clear_gvram_window();
+    int decode_display_compat_mode(uint8_t mode_register) const;
     void render_compat_line(uint8_t* row, int y, int mode) const;
     bool compat_window(uint16_t addr, int& bank, uint16_t& offset) const;
     void charge_compat_vram_wait();

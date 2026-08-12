@@ -176,7 +176,7 @@ void Mz2500::render(uint8_t* rgba) const {
         const uint8_t* gde = state.gde;
         uint8_t* row = rgba + (size_t)y * 640 * 4;
 
-        const int line_mode = crtc[0x0F] & 3;
+        const int line_mode = decode_display_compat_mode(crtc[0x0F]);
         if (line_mode == 1 || line_mode == 2) {
             render_compat_line(row, y, line_mode);
             continue;

@@ -63,20 +63,27 @@ int Mz2500::memory_compat_mode() const {
     return (bank_mode_ & 1) ? 1 : 2;
 }
 
+int Mz2500::decode_display_compat_mode(uint8_t mode_register) const {
+    const int mode = mode_register & 3;
+    if (mode == 1 || mode == 2) return mode;
+    // The real IPL's no-media path writes 08h: 200-line timing with MOD=00.
+    // In that state the rear MODE selector still determines which legacy
+    // character output is visible. MOD=11 explicitly forces MZ-2500 mode.
+    if (mode == 0 && (mode_register & 0x08) && boot_mode_ != 0)
+        return boot_mode_;
+    return 0;
+}
+
 int Mz2500::display_compat_mode() const {
-    const int mode = crtc_regs_[0x0F] & 3;
-    return mode == 1 || mode == 2 ? mode : 0;
+    return decode_display_compat_mode(crtc_regs_[0x0F]);
 }
 
 int Mz2500::effective_display_mode() const {
-    // The rear-panel selector is an IPL input and timing choice. It does not
-    // itself switch the character-controller output decode; the IPL must
-    // program CRTC register 0Fh before a legacy picture appears.
     return display_compat_mode();
 }
 
 int Mz2500::frame_cycles() const {
-    return (boot_mode_ != 0 || (crtc_regs_[0x0F] & 0x80))
+    return (boot_mode_ != 0 || (crtc_regs_[0x0F] & 0x08))
         ? CYCLES_PER_FRAME_15KHZ : CYCLES_PER_FRAME;
 }
 

@@ -6,23 +6,25 @@
 <!-- the page is the version stamp for everything it loads, so it must never
      be served from cache after a rebuild -->
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
-<title>MZ-2500 Web Emulator - NEKO CAN RUN</title>
-<meta name="description" content="SHARP MZ-2500エミュレータ（ブラウザ版・実機ROM不要）。自作アクションゲーム NEKO CAN RUN をそのままプレイできます。">
-<meta property="og:title" content="MZ-2500 Web Emulator - NEKO CAN RUN">
-<meta property="og:description" content="実機ROM不要のブラウザ版MZ-2500エミュレータで、猫が走る。SPACEで決定、カーソルで移動、Zでダッシュ。">
+<title>MZ-2500 Web Emulator</title>
+<meta name="description" content="SHARP MZ-2500／MZ-2000／MZ-80B互換モード対応のブラウザ版エミュレータ。同梱のNEKO CAN RUNデモも専用ボタンから起動できます。">
+<meta property="og:title" content="MZ-2500 Web Emulator">
+<meta property="og:description" content="D88をブラウザ内に保存して使えるMZ-2500エミュレータ。同梱のNEKO CAN RUNデモも選択して起動できます。">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2216%22 fill=%22%23101214%22/><path fill=%22%23d3b25c%22 d=%22M15 75V25h15l20 25 20-25h15v50H70V48L50 72 30 48v27z%22/></svg>">
-<link rel="stylesheet" href="style.css?v=20260812152016">
+<link rel="stylesheet" href="style.css?v=20260812183051">
 </head>
 <body>
 <main>
-  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD 20260812152016</span></h1>
+  <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD 20260812183051</span></h1>
   <div id="layout">
   <aside id="left-pane">
   <details id="help-config" class="help-menu">
     <summary>ヘルプ</summary>
     <details class="help-topic">
       <summary>デモゲームの遊び方</summary>
+      <p>画面下の <strong>NEKO</strong> を押すと、MODEを2500へ切り替えて
+        同梱の NEKO CAN RUN デモ版を起動します。</p>
       <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ<br>
         ゲームパッド: A / × = トリガ1 ・ B / ○ = トリガ2 ・ 十字キーまたは左スティック = 移動
         （割り当ては「ゲームパッドのボタン割り当て」で変更できます）</p>
@@ -42,7 +44,14 @@
         FDDベイへのドロップや交換アイコンでは、リセットせずディスクを交換できます。
         複数ボリューム入り D88 は自動分割され、ドライブ内の選択欄で切り替えられます。
         ディスクはこのブラウザ内に保存され、外部には送信されません。</p>
-      <p class="fine">各操作の短い説明は、ボタンへマウスを重ねるか、キーボードでフォーカスすると表示されます。</p>
+      <p>POWER ONでは、ユーザーが保存したD88があれば自動的に再挿入します。
+        保存済みD88がなければ無ディスクで待機し、同梱デモを勝手に挿入しません。
+        NEKOボタンで起動した同梱デモは保存済みD88を上書きしません。</p>
+      <p>画面下の DETAIL で、前面メディア部を通常のコンパクト表示と実機風の詳細表示に切り替えます。
+        選択した表示はこのブラウザに保存されます。</p>
+      <p>CMTはWAVに加え、MZ系の標準論理テープMZFを読み込めます。
+        同じ内容を持つ .mzt / .m12 も互換拡張子として受け付けます。</p>
+      <p class="fine">各操作の短い説明は、ボタンへマウスを2秒重ねるか、キーボードで2秒フォーカスすると表示されます。</p>
     </details>
   </details>
   <details id="hw-config">
@@ -106,7 +115,8 @@
       （捕捉中はブラウザが Esc を横取りするため MZ に届かず、画面上のキーボードもクリックできないため）。<br>
       MZ-1X10 は SIO チャンネルB につながり、OPN ポートA の b3 で切り替わります。<br>
       左クリック＝MZ-1X10 のボタン1、右クリック＝ボタン2です（中央ボタンは未対応）。
-      捕捉中は右クリックしてもブラウザの右クリックメニューは出ません。</p>
+      2本指クリックやControl＋クリックなど、OSがコンテキストメニュー操作として通知する入力も
+      ボタン2になります。捕捉中はブラウザのコンテキストメニューを表示しません。</p>
     <label class="fine">感度
       <input type="range" id="mouse-sens" min="1" max="40" step="1" value="10">
       <span id="mouse-sens-val">1.0</span>倍</label>
@@ -136,10 +146,14 @@
   </details>
   <details id="cmt-config">
     <summary>CMT data recorder</summary>
-    <p class="fine">画面下のボイスレコーダでWAVテープを操作します。カセット窓の下にある
-      アイコンは、左からWAV読込、再挿入、5分のブランク作成、ライトプロテクト、WAV保存です。</p>
-    <p class="fine">データトラックのパルス幅を保ったまま読み書きします。MIC・EARとRECキーは
-      実機のアナログ音声トラック用で、現在は外観と状態表示のみです。</p>
+    <p class="fine">画面下のボイスレコーダでWAV、およびMZ論理テープ
+      （.mzf / .mzt / .m12）を操作します。カセット窓の下にあるアイコンは、
+      左から読込、再挿入、5分のブランク作成、ライトプロテクト、保存です。</p>
+    <p class="fine">WAVはパルス幅を保って読み書きします。論理テープは現在のMODEに合うパルスへ変換し、
+      未変更なら元形式のまま保存、録音で変更するとWAVになります。曖昧な.cmt拡張子は対象外です。
+      MIC・EARとRECキーは実機のアナログ音声トラック用で、現在は外観と状態表示のみです。</p>
+    <p class="fine">確認済み：MZ-80Bモードでは、付属BASICカセット SB-5510 のMZFイメージが
+      実IPLから自動再生され、BASICまで起動します。MZ-2000のカセット起動は未確認です。</p>
   </details>
   <details id="sasi-config">
     <summary>SASI hard disk (MZ-1E30)</summary>
@@ -205,10 +219,12 @@
     <p class="fine">実機からご自身で吸い出した ROM を登録できます。ファイルは<strong>このブラウザ内にのみ保存</strong>され、
       どこにも送信されません。ROM が無くても同梱ゲームは完全動作します。</p>
     <div id="rom-slots"></div>
-    <p class="fine">Compatibility mode models the rear-panel selector. It uses the
-      MZ-2500 ipl.rom and kanji.rom; separate MZ-2000/MZ-80B IPL or CG ROM files
-      are not used. This matches black-box EmuZ-2500 output. Change MODE, then
-      press IPL.</p>
+    <p class="fine">互換モードは実機背面のMODE切り替えを再現します。
+      MZ-2500用の ipl.rom と kanji.rom を使い、kanji.rom内のMZ-2000互換文字領域を
+      MZ-2000／MZ-80B表示の文字源として読みます。そのため、両機種専用のIPLや
+      別のCG ROMは登録しません。EmuZ-2500の内部を参照しない比較でも、
+      無媒体IPLの選択画面はCG ROMの有無で変化せず、kanji.romの有無で変化することを確認しています。
+      MODEを変更した後にIPLを押してください。</p>
     <label class="fine"><input type="checkbox" id="real-ipl-mode">
       実IPLで起動する（ipl.rom 登録時のみ。BASIC-M25 などの市販ディスクを起動できます。
       文字表示には kanji.rom も登録してください）</label>
@@ -219,7 +235,7 @@
     <canvas id="screen" width="640" height="400"></canvas>
     <div id="overlay">
       <button id="power">POWER ON</button>
-      <p class="hint">NEKO CAN RUN デモ版（WORLD 1）を起動します（音が出ます）</p>
+      <p class="hint">保存済みのメディアと設定を復元して電源を入れます（音が出ます）</p>
     </div>
   </div>
   <section id="drivebay" aria-label="Front panel">
@@ -244,7 +260,7 @@
 
       <div class="cmt-cassette-bay">
         <div id="cmt-cassette" class="cmt-cassette-window" role="img"
-          aria-label="Cassette tape window" data-tooltip="CMTテープ。WAVは下のフォルダアイコンから読み込みます">
+          aria-label="Cassette tape window" data-tooltip="CMTテープ。WAVまたはMZ論理テープは下のフォルダから読み込みます">
           <div class="cmt-cassette-shell" aria-hidden="true">
             <span class="cmt-reel cmt-reel-left"></span>
             <span class="cmt-tape-path"></span>
@@ -256,8 +272,8 @@
         </div>
         <output id="cmt-state">POWER OFF</output>
         <div class="cmt-media-actions" aria-label="CMT media actions">
-          <button id="cmt-load" class="cmt-media-button" type="button" aria-label="Load WAV"
-            data-tooltip="WAVテープを読み込む">
+          <button id="cmt-load" class="cmt-media-button" type="button" aria-label="Load tape image"
+            data-tooltip="WAV / MZF / MZT / M12を読み込む">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z"/><path d="M8 14h8"/></svg>
           </button>
           <button id="cmt-insert" class="cmt-media-button" type="button" aria-label="Insert tape"
@@ -272,12 +288,12 @@
             aria-pressed="false" data-tooltip="ライトプロテクト">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="10" width="12" height="10"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>
           </button>
-          <button id="cmt-save" class="cmt-media-button" type="button" aria-label="Save WAV"
-            data-tooltip="現在のテープをWAV保存">
+          <button id="cmt-save" class="cmt-media-button" type="button" aria-label="Save tape image"
+            data-tooltip="現在のテープを保存。録音後はWAVになります">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10m0 0-4-4m4 4 4-4"/><path d="M5 16v4h14v-4"/></svg>
           </button>
         </div>
-        <input type="file" id="cmt-file" accept=".wav,audio/wav" class="offscreen">
+        <input type="file" id="cmt-file" accept=".wav,.mzf,.mzt,.m12,audio/wav" class="offscreen">
       </div>
 
       <div class="cmt-transport-panel">
@@ -318,7 +334,7 @@
         </div>
       </div>
     </section>
-    <div class="drive-stack">
+    <div id="drive-stack" class="drive-stack">
       <div class="drive" data-drive="0">
         <div class="drive-ident"><span class="lamp" id="lamp0" aria-hidden="true"></span><span class="dlabel">FD1</span></div>
         <div class="drive-slot">
@@ -334,7 +350,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h6l2 2h8v9H4z"/><path d="M8 13h8m0 0-2-2m2 2-2 2"/></svg>
           </button>
           <button class="icon-btn" id="eject0" type="button" aria-label="ディスクを取り出す"
-            data-tooltip="保存済みディスクを取り出す（次回はデモに戻ります）">
+            data-tooltip="保存済みディスクを取り出す">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 5 6 9H6z"/><path d="M6 18h12"/></svg>
           </button>
           <button class="icon-btn" id="blank0" type="button" aria-label="ブランクディスクを作成"
@@ -399,6 +415,10 @@
           aria-label="Master volume">
       </label>
       <div class="panel-toggles">
+        <button id="panel-detail-btn" class="panel-toggle" type="button" aria-pressed="false"
+          aria-controls="cmt-deck drive-stack" data-tooltip="前面メディア部の詳細表示を切り替える">DETAIL</button>
+        <button id="neko-demo-btn" class="panel-toggle" type="button"
+          data-tooltip="2500モードへ切り替え、NEKO CAN RUNデモを起動する">NEKO</button>
         <button id="tenkey-btn" class="panel-toggle" type="button" aria-pressed="false"
           data-tooltip="カーソルキーをテンキーとして送る">T.KEY</button>
         <button id="mouse-btn" class="panel-toggle" type="button" aria-pressed="false"
@@ -468,10 +488,12 @@
     <p class="fine"><strong>動作について：</strong>市販ソフトやフリーソフトで動作検証を行っていますが、
       <strong>すべてのソフトウェアの動作を保証するものではありません。</strong>
       未実装の周辺機器や、実機と挙動が異なる箇所が残っています。</p>
-    <p class="fine">本体ROM不使用（ブートはネイティブ代替実装）。ゲーム: (C) 2026 ZABAGLIONE PROJECT /
-      Emulator: MIT License, CPU core: superzazu/z80 (MIT), FM: ymfm (BSD-3-Clause).
-      EmuZ-2500 (Common Source Code Project) is used only as a black-box gold master.
-      Its internal implementation, source code and data are not used.</p>
+    <p class="fine">互換モードの媒体確認：MZ-80B付属BASICカセット SB-5510 は起動確認済みです。
+      MZ-2000のカセット起動は未確認です。</p>
+    <p class="fine">通常起動は本体ROM不使用（ネイティブ代替IPL）。ゲーム: (C) 2026 ZABAGLIONE PROJECT ／
+      エミュレータ: MIT License、CPUコア: superzazu/z80 (MIT)、FM音源: ymfm (BSD-3-Clause)。
+      EmuZ-2500（Common Source Code Project）は、外部から動作を比較するゴールドマスターとしてのみ
+      使用しています。内部実装、ソースコード、データは参照も流用もしていません。</p>
   </details>
   </div>
   <aside id="right-pane">
@@ -485,8 +507,8 @@
   </aside>
   </div>
 </main>
-<script>window.BUILD_ID = "20260812152016";</script>
-<script src="mz2500w.js?v=20260812152016"></script>
-<script src="emulator.js?v=20260812152016"></script>
+<script>window.BUILD_ID = "20260812183051";</script>
+<script src="mz2500w.js?v=20260812183051"></script>
+<script src="emulator.js?v=20260812183051"></script>
 </body>
 </html>

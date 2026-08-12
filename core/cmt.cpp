@@ -9,6 +9,10 @@
 namespace mz {
 namespace {
 
+constexpr uint32_t LOGICAL_TAPE_RATE = 44100;
+constexpr int16_t LOGICAL_TAPE_LEVEL = 24576;
+constexpr size_t MAX_LOGICAL_TAPE_SAMPLES = 100u * 1024u * 1024u;
+
 uint16_t read_le16(const uint8_t* p) {
     return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
@@ -42,6 +46,95 @@ int32_t decode_pcm(const uint8_t* p, int bits) {
     }
     return static_cast<int32_t>(read_le32(p)) >> 16;
 }
+
+struct LogicalTapeRecord {
+    const uint8_t* header;
+    const uint8_t* data;
+    size_t data_size;
+};
+
+class LogicalTapeEncoder {
+public:
+    explicit LogicalTapeEncoder(bool mz80b_mode)
+        : long_low_(mz80b_mode ? 14 : 21),
+          long_high_(mz80b_mode ? 15 : 22),
+          short_low_(mz80b_mode ? 7 : 11),
+          short_high_(mz80b_mode ? 8 : 12) {}
+
+    bool encode(const std::vector<LogicalTapeRecord>& records,
+                std::vector<int16_t>& out) {
+        samples_ = &out;
+        for (const auto& record : records) {
+            if (!gap(15000) || !tapemark(40) ||
+                !block(record.header, 128) || !gap(256) ||
+                !block(record.header, 128) || !gap(8000) ||
+                !tapemark(20) || !block(record.data, record.data_size) ||
+                !gap(256) || !block(record.data, record.data_size))
+                return false;
+        }
+        return !out.empty();
+    }
+
+private:
+    bool level(int16_t value, size_t count) {
+        if (count > MAX_LOGICAL_TAPE_SAMPLES - samples_->size()) return false;
+        samples_->insert(samples_->end(), count, value);
+        return true;
+    }
+
+    bool pulse(bool long_pulse) {
+        const size_t low = long_pulse ? long_low_ : short_low_;
+        const size_t high = long_pulse ? long_high_ : short_high_;
+        return level(-LOGICAL_TAPE_LEVEL, low) &&
+               level(LOGICAL_TAPE_LEVEL, high);
+    }
+
+    bool gap(size_t count) {
+        for (size_t i = 0; i < count; ++i)
+            if (!pulse(false)) return false;
+        return true;
+    }
+
+    bool tapemark(size_t count) {
+        for (size_t i = 0; i < count; ++i)
+            if (!pulse(true)) return false;
+        for (size_t i = 0; i < count; ++i)
+            if (!pulse(false)) return false;
+        return pulse(true) && pulse(true);
+    }
+
+    bool byte(uint8_t value) {
+        for (int bit = 7; bit >= 0; --bit)
+            if (!pulse((value & (1u << bit)) != 0)) return false;
+        return pulse(true);
+    }
+
+    bool checksum(uint16_t value) {
+        for (int bit = 15; bit >= 0; --bit) {
+            if (!pulse((value & (1u << bit)) != 0)) return false;
+            if (bit == 8 || bit == 0)
+                if (!pulse(true)) return false;
+        }
+        return pulse(true);
+    }
+
+    bool block(const uint8_t* data, size_t size) {
+        uint16_t sum = 0;
+        for (size_t i = 0; i < size; ++i) {
+            const uint8_t value = data[i];
+            for (int bit = 0; bit < 8; ++bit)
+                sum = static_cast<uint16_t>(sum + ((value >> bit) & 1));
+            if (!byte(value)) return false;
+        }
+        return checksum(sum);
+    }
+
+    std::vector<int16_t>* samples_ = nullptr;
+    size_t long_low_;
+    size_t long_high_;
+    size_t short_low_;
+    size_t short_high_;
+};
 
 } // namespace
 
@@ -120,6 +213,35 @@ bool CmtDeck::load_wav(const uint8_t* data, size_t size) {
         mono[frame] = static_cast<int16_t>(std::clamp<int64_t>(mixed, -32768, 32767));
     }
     set_media(std::move(mono), rate);
+    return true;
+}
+
+bool CmtDeck::load_mzf(const uint8_t* data, size_t size, bool mz80b_mode) {
+    if (!data || size < 129) return false;
+
+    std::vector<LogicalTapeRecord> records;
+    for (size_t offset = 0; offset < size;) {
+        if (size - offset < 128) return false;
+        const size_t data_size = read_le16(data + offset + 0x12);
+        if (data_size == 0 || data_size > size - offset - 128) return false;
+        records.push_back({data + offset, data + offset + 128, data_size});
+        offset += 128 + data_size;
+    }
+
+    std::vector<int16_t> samples;
+    const size_t reserve_hint = size >
+            (MAX_LOGICAL_TAPE_SAMPLES - 1000000) / 800
+        ? MAX_LOGICAL_TAPE_SAMPLES
+        : static_cast<size_t>(1000000) + size * static_cast<size_t>(800);
+    try {
+        samples.reserve(reserve_hint);
+        LogicalTapeEncoder encoder(mz80b_mode);
+        if (!encoder.encode(records, samples)) return false;
+    } catch (...) {
+        return false;
+    }
+    mz80b_mode_ = mz80b_mode;
+    set_media(std::move(samples), LOGICAL_TAPE_RATE);
     return true;
 }
 
