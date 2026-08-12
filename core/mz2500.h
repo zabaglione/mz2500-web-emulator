@@ -10,14 +10,18 @@
 
 #include "core/adpcm.h"
 #include "core/banked_memory.h"
+#include "core/cmt.h"
 #include "core/d88.h"
 #include "core/emm.h"
 #include "core/fdc_mb8877.h"
 #include "core/gcrtc.h"
 #include "core/mouse.h"
 #include "core/opn.h"
+#include "core/printer.h"
+#include "core/sasi.h"
 #include "core/timing.h"
 #include "core/vram_wait.h"
+#include "core/z80_sio.h"
 
 extern "C" {
 #include "z80/z80.h"
@@ -68,14 +72,20 @@ public:
     // behind. Implemented in core/dummy_ipl.cpp.
     bool boot_from_disk();
 
-    // User-provided ROM images (kind: 0=ipl, 1=cg, 2=kanji, 3=dict). Never
+    // Front-panel RESET: pulse only the Z80 reset input. Unlike IPL, this
+    // deliberately preserves RAM, bank mapping, video state, and peripheral
+    // latches so resident system software can handle its reset vector.
+    void system_reset();
+
+    // User-provided ROM images (kind: 0=ipl, 1=retired/reserved, 2=kanji, 3=dict,
+    // 4=MZ-1E30 SASI BIOS). Never
     // bundled; the owner supplies the files at runtime.
     void set_rom(int kind, const uint8_t* data, size_t size);
 
     // Expansion-board configuration (kind: 0=expansion RAM 256KB,
     // 1=expansion GRAM second screen, 2=MZ-1M10 4096-colour palette board,
-    // 3=MZ-1E35 ADPCM board, 4=MZ-1R37 640K EMM).
-    // Takes effect immediately; RAM/GRAM changes want a RESET to be sane.
+    // 3=MZ-1E35 ADPCM board, 4=MZ-1R37 640K EMM, 5=MZ-1E30 SASI).
+    // Takes effect immediately; RAM/GRAM changes want an IPL to be sane.
     void set_hw_option(int kind, bool on) {
         switch (kind) {
         case 0: mem_.set_expansion_ram(on); break;
@@ -83,9 +93,25 @@ public:
         case 2: mz1m10_present_ = on; break;
         case 3: adpcm_present_ = on; break;
         case 4: emm_present_ = on; break;
+        case 5: sasi_present_ = on; break;
         }
     }
     bool has_ipl_rom() const { return mem_.has_ipl_rom(); }
+    bool has_kanji_rom() const { return mem_.has_kanji_rom(); }
+
+    // Rear-panel compatibility selector sampled by the IPL. Mode 0 is the
+    // native MZ-2500 position, 1 is MZ-2000/2200 and 2 is MZ-80B. The
+    // selected legacy modes run the Z80 at 4 MHz; firmware later programs
+    // the independent memory (B7h) and display (CRTC register 0Fh) mode
+    // latches. Set this before IPL/boot, as on the physical machine.
+    void set_boot_mode(int mode);
+    int boot_mode() const { return boot_mode_; }
+    int memory_compat_mode() const;
+    int display_compat_mode() const;
+    int effective_display_mode() const;
+    int frame_cycles() const;
+    int frame_lines() const;
+    int visible_lines() const;
 
     // Authentic cold boot through a user-provided IPL ROM: reset bank map
     // {34h-37h, 04-07}, PC=0000h. Experimental - exercises whatever hardware
@@ -155,6 +181,74 @@ public:
     void set_boot_delay_frames(int frames) { boot_delay_frames_ = frames; }
     FdcMb8877& fdc() { return fdc_; }
 
+    // Built-in data recorder. WAV is the interchange format because it
+    // preserves loaders that use their own pulse widths instead of assuming
+    // one logical cassette-file encoding.
+    bool insert_cmt_wav(const uint8_t* data, size_t size) {
+        return cmt_.load_wav(data, size);
+    }
+    bool create_blank_cmt(uint32_t seconds) { return cmt_.create_blank(seconds, 22050); }
+    void eject_cmt() { cmt_.eject(); }
+    void cmt_manual_command(int command) {
+        if (command >= 0 && command <= 3)
+            cmt_.manual_command(static_cast<CmtDeck::Transport>(command), cpu_.cyc);
+    }
+    int cmt_transport() const { return static_cast<int>(cmt_.transport()); }
+    bool cmt_loaded() const { return cmt_.tape_loaded(); }
+    bool cmt_recording() const { return cmt_.recording(); }
+    bool cmt_write_protected() const { return cmt_.write_protected(); }
+    void set_cmt_write_protected(bool on) { cmt_.set_write_protected(on); }
+    uint64_t cmt_position_ms() { return cmt_.position_ms(cpu_.cyc); }
+    uint64_t cmt_duration_ms() const { return cmt_.duration_ms(); }
+    bool cmt_dirty() const { return cmt_.dirty(); }
+    void clear_cmt_dirty() { cmt_.clear_dirty(); }
+    std::vector<uint8_t> cmt_wav_image() const { return cmt_.wav_image(); }
+    CmtDeck& cmt() { return cmt_; }
+
+    // Parallel printer capture. The host receives exactly the byte stream
+    // accepted through FEh/FFh, without assuming a text encoding or printer
+    // command language.
+    const std::vector<uint8_t>& printer_output() const { return printer_.output(); }
+    bool printer_dirty() const { return printer_.dirty(); }
+    void clear_printer_dirty() { printer_.clear_dirty(); }
+    void clear_printer_output() { printer_.clear_output(); }
+    void set_printer_online(bool on) { printer_.set_online(on, cpu_.cyc); }
+    bool printer_online() const { return printer_.online(); }
+    uint64_t printer_dropped_bytes() const { return printer_.dropped_bytes(); }
+
+    // MZ-1E30 SASI target. Images are raw logical blocks; block size is
+    // explicit except for the well-known MZ-1F23 1024-byte image size.
+    bool insert_sasi_image(const uint8_t* data, size_t size, uint32_t block_size) {
+        return sasi_.load_image(data, size, block_size);
+    }
+    bool create_blank_sasi(size_t size, uint32_t block_size) {
+        return sasi_.create_blank(size, block_size);
+    }
+    void eject_sasi() { sasi_.eject(); }
+    bool sasi_loaded() const { return sasi_.loaded(); }
+    uint32_t sasi_block_size() const { return sasi_.block_size(); }
+    const std::vector<uint8_t>& sasi_image() const { return sasi_.image(); }
+    bool sasi_dirty() const { return sasi_.dirty(); }
+    void clear_sasi_dirty() { sasi_.clear_dirty(); }
+    bool sasi_write_protected() const { return sasi_.write_protected(); }
+    void set_sasi_write_protected(bool on) { sasi_.set_write_protected(on); }
+    void set_sasi_target_id(uint8_t id) { sasi_.set_target_id(id); }
+    uint8_t sasi_target_id() const { return sasi_.target_id(); }
+    int sasi_phase() const { return static_cast<int>(sasi_.phase()); }
+
+    bool set_adpcm_ram_size(uint32_t size) { return adpcm_.set_adpcm_ram_size(size); }
+    uint32_t adpcm_ram_size() const { return adpcm_.adpcm_ram_size(); }
+    void set_adpcm_gpio_inputs(uint8_t value) { adpcm_.set_gpio_inputs(value); }
+    uint8_t adpcm_gpio_direction() const { return adpcm_.gpio_direction(); }
+    uint8_t adpcm_gpio_outputs() const { return adpcm_.gpio_output_pins(); }
+    uint8_t adpcm_gpio_pins() const { return adpcm_.gpio_pins(); }
+    bool adpcm_adc_enabled() const { return adpcm_.adc_enabled(); }
+    size_t queue_adpcm_input(const float* samples, size_t count, uint32_t rate) {
+        return adpcm_present_ ? adpcm_.queue_adc_samples(samples, count, rate) : 0;
+    }
+    void clear_adpcm_input() { adpcm_.clear_adc_samples(); }
+    void set_adpcm_mix_gain(float gain) { adpcm_.set_mix_gain(gain); }
+
     // Keyboard matrix (active-low rows read through PIO port B / EAh; the
     // row is the low nibble of the E8h latch). Empirically verified vs
     // EmuZ: row 3 = space/cursor cluster, letters run A=(4,1) .. Z=(7,2).
@@ -189,10 +283,40 @@ public:
         adpcm_.set_output_rate(rate);
     }
 
-    // Feed a byte to a SIO channel's receiver, as a device on the line
-    // would. Channel B is where the mouse arrives; used to probe what the
-    // system's mouse driver makes of a byte stream.
-    void sio_receive(int channel, uint8_t value) { sio_[channel & 1].push(value); }
+    // Feed one complete character from an external serial line to the SIO.
+    // The receiver's WR3 enable and Auto Enables/DCD state are honoured.
+    void sio_receive(int channel, uint8_t value);
+    bool sio_queue_receive(int channel, uint8_t value);
+    bool sio_pop_transmitted(int channel, Z80Sio::TxByte& value) {
+        return sio_.pop_transmitted(channel, value);
+    }
+    size_t sio_transmitted_available(int channel) const {
+        return sio_.transmitted_available(channel);
+    }
+    uint32_t sio_baud(int channel) const { return sio_.baud(channel); }
+    int sio_receive_bits(int channel) const { return sio_.receive_bits(channel); }
+    int sio_transmit_bits(int channel) const { return sio_.transmit_bits(channel); }
+    uint8_t sio_stop_half_bits(int channel) const {
+        return sio_.stop_half_bits(channel);
+    }
+    Z80Sio::Parity sio_parity(int channel) const { return sio_.parity(channel); }
+    bool sio_receiver_enabled(int channel) const {
+        return sio_.receiver_enabled(channel);
+    }
+    bool sio_transmitter_enabled(int channel) const {
+        return sio_.transmitter_enabled(channel);
+    }
+    bool sio_rs232_connected(int channel) const {
+        return (channel & 1) == 0 || !mouse_connected();
+    }
+    bool sio_dtr(int channel) const { return sio_.dtr(channel); }
+    bool sio_rts(int channel) const { return sio_.rts(channel); }
+    bool sio_break_active(int channel) const {
+        return sio_.break_active(channel);
+    }
+    void sio_set_modem_inputs(int channel, bool cts, bool dcd) {
+        sio_.set_modem_inputs(channel, cts, dcd, false, cpu_.cyc);
+    }
 
     // Host mouse input. Movement accumulates until the driver strobes DTR;
     // the ratio the machine applies on top is the software's setting and
@@ -208,10 +332,33 @@ public:
     // the FDC command registers, the RTC and the GDE); these instead touch
     // exactly the signals the mouse packet path depends on: DTR, the OPN
     // gate byte, and SIO channel B's receive queue.
-    void test_set_sio_dtr(int channel, bool high) { sio_dtr_changed(channel & 1, high); }
-    void test_set_opn_port_a(uint8_t value) { opn_regs_[0x0E] = value; }
-    bool test_sio_channel_b_has_data() const { return !sio_[1].rx_empty(); }
-    uint8_t test_sio_channel_b_read_byte() { return sio_[1].pop(); }
+    void test_set_sio_dtr(int channel, bool high);
+    void test_enable_sio_receiver(int channel);
+    uint8_t test_sio_port_in(uint16_t port) {
+        const uint8_t low = port & 0xFF;
+        if ((low >= 0xA0 && low <= 0xA3) ||
+            (low >= 0xB0 && low <= 0xB3))
+            return io_in_raw(port);
+        return 0xFF;
+    }
+    void test_sio_port_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if ((low >= 0xA0 && low <= 0xA3) ||
+            (low >= 0xB0 && low <= 0xB3) || low == 0xCD)
+            io_out(port, value);
+    }
+    void test_set_opn_port_a(uint8_t value) {
+        opn_addr_ = 0x07;
+        opn_regs_[0x07] |= 0x40;
+        opn_.write_address(0x07, cpu_.cyc);
+        opn_.write_data(opn_regs_[0x07], cpu_.cyc);
+        opn_addr_ = 0x0E;
+        opn_regs_[0x0E] = value;
+        opn_.write_address(0x0E, cpu_.cyc);
+        opn_.write_data(value, cpu_.cyc);
+    }
+    bool test_sio_channel_b_has_data() const { return sio_.rx_available(1); }
+    uint8_t test_sio_channel_b_read_byte() { return sio_.read_data(1, cpu_.cyc); }
 
     // Test-only I/O access, narrowed to the option boards' ports (ACh/ADh
     // EMM, 98h/99h ADPCM). The mouse hooks above explain why the full I/O
@@ -226,6 +373,45 @@ public:
         if (low == 0xAC || low == 0xAD || low == 0x98 || low == 0x99)
             io_out(port, value);
     }
+    uint8_t test_cmt_port_in(uint16_t port) {
+        return (port & 0xFF) >= 0xE0 && (port & 0xFF) <= 0xE3
+            ? io_in_raw(port) : 0xFF;
+    }
+    void test_cmt_port_out(uint16_t port, uint8_t value) {
+        if ((port & 0xFF) >= 0xE0 && (port & 0xFF) <= 0xE3)
+            io_out(port, value);
+    }
+    uint8_t test_printer_port_in(uint16_t port) {
+        return (port & 0xFF) == 0xFE ? io_in_raw(port) : 0xFF;
+    }
+    void test_printer_port_out(uint16_t port, uint8_t value) {
+        if ((port & 0xFF) == 0xFE || (port & 0xFF) == 0xFF)
+            io_out(port, value);
+    }
+    uint8_t test_sasi_port_in(uint16_t port) {
+        const uint8_t low = port & 0xFF;
+        return (low == 0xA4 || low == 0xA5 || low == 0xA9)
+            ? io_in_raw(port) : 0xFF;
+    }
+    void test_sasi_port_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if (low == 0xA4 || low == 0xA5 || low == 0xA8)
+            io_out(port, value);
+    }
+    uint8_t test_compat_port_in(uint16_t port) {
+        const uint8_t low = port & 0xFF;
+        return (low == 0xC9 || (low >= 0xF4 && low <= 0xF7))
+            ? io_in_raw(port) : 0xFF;
+    }
+    void test_compat_port_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if (low == 0xB7 || low == 0xC8 || low == 0xC9 || low == 0xE8 ||
+            (low >= 0xF4 && low <= 0xF7))
+            io_out(port, value);
+    }
+    uint8_t test_compat_memory_read(uint16_t address);
+    void test_compat_memory_write(uint16_t address, uint8_t value);
+    void test_reset_peripherals() { reset_peripherals_for_boot(); }
 
     // Machine state snapshot as JSON (debug panel / future tooling).
     // Returns the number of bytes written (excluding the terminator).
@@ -242,7 +428,7 @@ public:
     // writes, and the BEEP speaker line (8255 port C bit2).
     const uint8_t* opn_reg_shadow() const { return opn_regs_; }
     uint8_t fm_keyon(int ch) const { return fm_keyon_[ch % 3]; }
-    bool beep_on() const { return (ppi_[2] & 0x04) != 0; }
+    bool beep_on() const { return ppi_port_c_high(2); }
 
     // Firmware forensics: when PC first reaches `addr`, dump the recent
     // execution and I/O history to stderr (CLI --trace-trap).
@@ -250,16 +436,22 @@ public:
     void dump_forensics(const char* why);
 
 private:
+    // Reset CPU-external device state shared by both boot paths. Firmware
+    // handoff values belong in boot_from_disk(), after this neutral baseline;
+    // boot_with_real_ipl() must let the ROM establish them itself.
+    void reset_peripherals_for_boot();
     static uint8_t cb_read(void* ud, uint16_t addr);
     static void cb_write(void* ud, uint16_t addr, uint8_t value);
     static uint8_t cb_in(z80* z, uint16_t port);
     static void cb_out(z80* z, uint16_t port, uint8_t value);
+    static void cb_reti(z80* z);
 
     void charge_access_wait(int bank);
     // Is the controller fetching the layer this memory block feeds, on the
     // raster the CPU is on? Only then does it hold the bus long enough to
     // stall the access. See charge_access_wait() in mz2500.cpp.
     bool layer_scanning(int bank, int line) const;
+    int display_stall_cycles_current() const;
     bool graphics_scanning(int line) const;
     bool text_scanning(int line) const;
     WinKind text_vwin_kind() const {
@@ -271,6 +463,11 @@ private:
     void rtc_write(int reg, uint8_t value);
     void gvram_rmw_write(int bank, uint16_t off, uint8_t value);
     uint8_t gvram_rmw_read(int bank, uint16_t off);
+    void clear_gvram_window();
+    void render_compat_line(uint8_t* row, int y, int mode) const;
+    bool compat_window(uint16_t addr, int& bank, uint16_t& offset) const;
+    void charge_compat_vram_wait();
+    void update_boot_sense_inputs();
     void io_out(uint16_t port, uint8_t value);
     uint8_t blank_flags() const; // port F4h read: bit0 VBLANK, bit1 HBLANK
     void log_port_once(uint16_t port, const char* dir);
@@ -282,17 +479,19 @@ private:
     FdcMb8877 fdc_;
     OpnYm2203 opn_;
     AdpcmY8950 adpcm_;
+    CmtDeck cmt_;
+    PrinterPort printer_;
+    SasiController sasi_;
 
     // register latches for devices that later phases bring to life
     uint8_t opn_addr_ = 0;
     uint8_t opn_regs_[256] = {};
     uint8_t fm_keyon_[3] = {};    // reg 28h slot masks per FM channel
     uint8_t crtc_index_ = 0;      // port F4h write
-    // port F5h data (includes the graphic palette at 80h+). Register 00h
-    // starts at the value every MZ-2500 IPL leaves it at - 25 rows, one text
-    // page, 8-colour text over 16-colour graphics - so that a program which
-    // never writes it finds the machine the way real firmware hands it over.
-    uint8_t crtc_regs_[256] = {0x05};
+    // port F5h data (includes the graphic palette at 80h+). The object and
+    // hardware-reset baseline is neutral; the native bootstrap supplies the
+    // observed firmware handoff separately.
+    uint8_t crtc_regs_[256] = {};
     // Has anything written the text display window pairs (03h/05h
     // vertical, 07h/08h horizontal)? A window programmed shut and a
     // window never programmed look the same in the registers, so the
@@ -300,62 +499,69 @@ private:
     bool crtc_vwin_written_ = false;
     bool crtc_hwin_written_ = false;
     // port F6h: bit3 MG, bit2 GE, bit1 RE, bit0 BE (BE also gates the I
-    // plane in 16-colour mode). Starts with all three guns enabled, which
-    // is what the firmware finds and (mostly) never changes.
-    uint8_t cg_mask_ = 0x07;
+    // plane in 16-colour mode). The native bootstrap supplies the observed
+    // firmware handoff value; a real-ROM boot starts from the neutral reset
+    // baseline and lets the ROM program it.
+    uint8_t cg_mask_ = 0;
     uint8_t font_size_ = 0;       // port F7h
+    // Legacy character-controller registers reached through F4h-F7h once
+    // CRTC register 0Fh changes the display decode. In 80B mode one byte
+    // also drives the memory controller's display/access selection.
+    uint8_t compat_vram_control_ = 0;
+    uint8_t compat_background_ = 0;
+    uint8_t compat_text_colour_ = 7;
+    uint8_t compat_graphics_mask_ = 0;
     uint8_t gde_index_ = 0;       // port BCh register number (7 bits)
     bool gde_autoinc_ = false;    // BCh bit7: bump reg number after each write
     uint8_t gde_regs_[32] = {};   // port BDh, internal registers 00-1Fh
     uint64_t gde_busy_until_ = 0; // hardware GRAM clear in progress
     uint8_t gvram_latch_[4] = {}; // ports BCh-BFh: last plane bytes read
-    // GDEHS/GDEHE (registers 0Ch/0Dh) are the horizontal display window.
-    // The controller compares them against its dot counter as it scans, so
-    // the value that matters is the one in force on the raster being drawn,
-    // not the one left in the register when the frame ends. A program that
-    // reshapes the window every raster - the way a non-rectangular mask over
-    // a picture is made - depends on that, and it parks the window shut in
-    // vertical blanking between passes. Reading the registers once per frame
-    // samples exactly that parked value and blanks the whole screen, so keep
-    // what each line saw instead.
-    uint8_t hwin_line_[LINES_PER_FRAME][2] = {};
     int current_line() const;
-    void seed_hwin_lines();
-
-    // Z80B SIO. Channel A is the RS-232C 9-pin port (A0h data, A1h command
-    // and status); channel B is the 25-pin port, or the mouse when OPN port
-    // A bit3 is set (A2h/A3h). Nothing is wired to either yet, so the model
-    // is the register file and a status byte that says "no character has
-    // arrived, the transmitter is idle" - which is what an absent device
-    // looks like, and is not what open bus was telling the firmware.
-    struct SioChannel {
-        uint8_t regs[8] = {};
-        uint8_t pointer = 0; // next register the command port addresses
-        uint8_t rx[16] = {};
-        uint8_t rx_head = 0, rx_tail = 0;
-        bool rx_empty() const { return rx_head == rx_tail; }
-        void push(uint8_t v) {
-            const uint8_t n = (uint8_t)((rx_tail + 1) & 15);
-            if (n == rx_head) return; // full: the real chip would overrun
-            rx[rx_tail] = v;
-            rx_tail = n;
-        }
-        uint8_t pop() {
-            if (rx_empty()) return 0;
-            const uint8_t v = rx[rx_head];
-            rx_head = (uint8_t)((rx_head + 1) & 15);
-            return v;
-        }
+    int frame_line_start(int line) const;
+    // The browser presents a completed frame after the CPU has already run
+    // all of it. Keep the display-facing register and palette state that was
+    // in force on each visible raster so a mid-frame write does not rewrite
+    // the rows that the real video circuitry has already scanned.
+    struct RasterLineState {
+        uint8_t crtc[256] = {};
+        uint8_t gde[32] = {};
+        uint8_t palette[32] = {};
+        uint8_t cg_mask = 0;
+        uint8_t font_size = 0;
+        uint8_t pio_a = 0;
+        uint8_t ppi_a = 0;
+        uint8_t ppi_control = 0x9B;
+        uint8_t ppi_c = 0;
+        uint8_t opn_port_a = 0;
+        uint8_t compat_vram_control = 0;
+        uint8_t compat_background = 0;
+        uint8_t compat_text_colour = 7;
+        uint8_t compat_graphics_mask = 0;
+        bool crtc_vwin_written = false;
+        bool crtc_hwin_written = false;
+        bool palette_written = false;
+        bool opn_port_a_output = false;
     };
-    SioChannel sio_[2];
+    RasterLineState raster_line_[VBLANK_START_LINE] = {};
+    void seed_raster_lines();
+    int raster_write_start_line() const;
+
+    // Z80B SIO. Channel A is the 9-pin RS-232C port; channel B is the
+    // 25-pin port or the mouse selected by OPN port A bit3.
+    Z80Sio sio_;
     Mouse mouse_;
     // The mouse shares channel B with the 25-pin RS-232C port; OPN port A
     // bit3 is the switch (Oh!MZ p299). With the switch open the line is
     // empty, which is what an unplugged port looks like.
-    bool mouse_connected() const { return (opn_regs_[0x0E] & 0x08) != 0; }
+    bool mouse_connected() const {
+        return opn_.port_a_is_output() && (opn_.port_a_pins() & 0x08) != 0;
+    }
     void sio_dtr_changed(int ch, bool dtr);
+    void sio_write_control(int ch, uint8_t value);
+    bool decode_sio_port(uint8_t port, int& channel, bool& control) const;
+    void write_sio_clock_control(uint8_t value);
     bool sio_dtr_[2] = {false, false};
-    uint8_t sio_status(int ch) const;
+    uint8_t sio_clock_control_ = 0; // CDh: address select + A/B TxRxC dividers
     uint8_t palette_[32] = {};    // port AEh, indexed by B register
     bool palette_written_ = false; // MZ-1M10 palette RAM has been programmed
     // interrupt controller (C6h/C7h) + 8253 ch0. MZSD is the only client:
@@ -384,7 +590,9 @@ private:
         uint8_t rd_phase = 0;
         uint16_t latch = 0;
         bool latched = false;
+        bool loaded = false;
         bool counting = false;
+        bool terminal = false;
         uint64_t start_cyc = 0;
         uint32_t count() const { return reload ? reload : 0x10000; }
     };
@@ -395,13 +603,28 @@ private:
     void pit_write_control(uint8_t value);
     void pit_write_counter(int ch, uint8_t value);
     uint8_t pit_read_counter(int ch);
+    void pit_start_counter(int ch);
+    void pit_gate_strobe();
     uint8_t pio_a_ = 0;           // port E8h latch
     uint8_t bank_mode_ = 0;       // port B7h latch
+    int boot_mode_ = 0;           // rear-panel selector: native/2000/80B
     uint8_t ppi_[3] = {};         // 8255 A/B/C latches (E0h-E2h)
+    uint8_t ppi_control_ = 0x9B;  // reset: mode 0, all ports are inputs
+    bool ppi_port_a_output() const { return (ppi_control_ & 0x10) == 0; }
+    bool ppi_port_b_output() const { return (ppi_control_ & 0x02) == 0; }
+    bool ppi_port_c_output(int bit) const {
+        return (ppi_control_ & (bit < 4 ? 0x01 : 0x08)) == 0;
+    }
+    bool ppi_port_c_high(int bit) const {
+        return ppi_port_c_output(bit) && (ppi_[2] & (1 << bit)) != 0;
+    }
+    void ppi_write_control(uint8_t value);
+    void update_ppi_outputs();
     uint8_t pio_ctrl_[2] = {};    // Z80 PIO control words (E9h/EBh)
     bool mz1m10_present_ = true;  // 4096-colour palette board option
     bool adpcm_present_ = true;   // MZ-1E35 ADPCM board option
     bool emm_present_ = true;     // MZ-1R37 640K EMM option
+    bool sasi_present_ = true;    // MZ-1E30 SASI interface option
     Emm emm_;
     uint8_t joy_enable_ = 0;      // port EFh
     uint8_t key_rows_[16] = {};   // pressed bits per matrix row
@@ -439,6 +662,14 @@ private:
 
     uint64_t frame_origin_ = 0;
     uint64_t frames_ = 0;
+    // cpu_.cyc is the 6 MHz machine-time axis shared by video, sound and
+    // peripherals. A legacy-mode Z80 T-state occupies 1.5 of those ticks;
+    // this remainder preserves the half tick between instructions. Waits
+    // added by memory callbacks are already machine-time ticks and are not
+    // scaled a second time.
+    uint8_t cpu_half_cycle_ = 0;
+    uint64_t step_external_wait_ = 0;
+    bool cpu_step_active_ = false;
     int boot_delay_frames_ = DEFAULT_BOOT_DELAY_FRAMES;
     int idle_frames_remaining_ = 0;
     bool trace_boot_ = false;

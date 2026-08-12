@@ -51,7 +51,7 @@ npm run build                 # dist/index.js ができれば完了
 
 | フラグ | 意味 |
 | --- | --- |
-| `--rom-dir DIR` (`MZ2500_ROM_DIR`) | `ipl.rom`/`cg.rom`/`kanji.rom`/`dict.rom` を探すディレクトリ |
+| `--rom-dir DIR` (`MZ2500_ROM_DIR`) | `ipl.rom`/`kanji.rom`/`dict.rom` を探すディレクトリ |
 | `--ipl-rom` 等 (`MZ2500_IPL_ROM` 等) | ROMを個別指定（`--rom-dir` より優先） |
 | `--disk-a PATH` (`MZ2500_DISK_A`) | ドライブ0（FD1）のD88。BASICブートディスク等 |
 | `--disk-b PATH\|blank` (`MZ2500_DISK_B`) | ドライブ1（FD2）。既定は未フォーマットのブランク |

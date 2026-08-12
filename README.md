@@ -32,17 +32,27 @@ MZ-2500 のうち、IPLPRO ブートのゲームソフトが使う範囲を実�
 - バンクメモリ 64×8KB（B4h/B5h、IN(B5h) セレクタ自動+1 の癖を含む）
 - MB8877 FDC 読み書き両系（READ/WRITE SECTOR〈単一・マルチセクタ、
   ディレクテッドアドレスマークを含む〉、READ ADDRESS、READ/WRITE TRACK
-  〈物理フォーマット〉、STEP系、ライトプロテクト）+ D88（反転バス）、
+  〈物理フォーマット〉、STEP系、ライトプロテクト、DEhによるFM/MFM選択。
+  同一C/H/Rが混在するD88でも密度を含めてレコードを選択し、MFM 250kbps /
+  FM 125kbpsの転送周期と1回転バイト数を反映）
+  + D88（反転バス）、
   ネイティブ IPLPRO ブート。セクタ転送はホストがデータレジスタを
   読み切るタイミングではなく、ディスク自身のスケジュールで完了します
 - テキスト画面 40/80桁 + PCG（モノクロ/3面合成カラー）、GDE 320×200 16色
   （リングスクロール SAD0-2/SLN1/HDSC、ウィンドウマスク）、CLUT、
   MZ-1M10 RGB444 パレット + デジタルパレット、256色/640×400モード、
-  第2テキストページ、背景色
-- 8253 ch0 + 割込コントローラ（C6h/C7h、IM2）
-- YM2203（ymfm。BUSY をサイクル精度でエミュレート）
+  第2テキストページ、背景色、標準/拡張GRAMのEX切替、表示窓とプレーンを
+  指定する画面一括消去（BDh BUSYを含む）。拡張GRAM非装着時もCPU窓と
+  描画側で同じ不在状態を返します
+- 8253 ch0 + GATEパルス（F0h-F3h）+ 割込コントローラ（C6h/C7h、IM2）
+- 8255 mode set/BSR、Port A/B/C方向制御、VGATE、BEEP
+- YM2203（ymfm。BUSY、Timer A/B満了、CSM、SSG I/O方向をCPUサイクル基準で
+  エミュレート）
 - キーマトリクス、ジョイスティック（ゲームパッド対応）
-- 漢字ROM窓・辞書ROM窓、RP5C15 RTC、Z80B SIO（受信）、MZ-1X10 マウス
+- 漢字ROM窓・辞書ROM窓、RP5C15 RTC、Z80B SIO（2chのWR/RR、送受信FIFO、
+  非同期フレーム時間、割込ベクタ、モデム線）、MZ-1X10 マウス。CDhで外部
+  クロックを切り替え、ブラウザ側は仮想端末・時間付きループバック・Web Serial
+  を選択可能
 - ポートF6h グラフィックマスク（bit2/1/0 が緑/赤/青の出力をゲート。
   16色モードでは bit0 が I プレーンも遮断）。グラフィック層のみに作用
 - MZ-1E35 ADPCM ボード（Y8950、ポート98h/99h。ADPCM RAM 32KBは暫定値 —
@@ -50,15 +60,49 @@ MZ-2500 のうち、IPLPRO ブートのゲームソフトが使う範囲を実�
   IRQ線は実機同様配線なし＝ステータスポーリング。実ソフトの装着チェックは
   通過（SBディスクマガジン「星くずばこ」が装着ありと判定）。delta-T RAM
   再生は実装・単体テスト済みだが、実ソフトでの再生確認は未了 —
-  確認方法を確立するまで「装着チェック通過」までが検証範囲です）
+  確認方法を確立するまで「装着チェック通過」までが検証範囲です。
+  RESET時のボードRAM保持も資料未確認の暫定互換方針です）。8KB〜256KBの
+  外部メモリ構成、Y8950の4bit GPIO方向/入出力、AD入力を実装し、ブラウザの
+  音声入力と未校正ミックスゲインを明示的に選択可能
 - MZ-1R37 640KB EMM（ポートACh/ADh。SBディスクマガジン「星くずばこ」が
   認識して実動作することを確認済み）
+- 内蔵CMTデッキ（PCM WAV、再生/録音/早送り/巻戻し、8255操作線、センサ、
+  オートリワインド、MZ-80B固有操作、ブラウザ内保存）
+- セントロニクス系プリンタポート（FEh/FFh、STB/PRIM、BUSY/ACK、割込、
+  生バイト列の表示・保存）
+- MZ-1E30 SASI（A4h/A5hのバスフェーズとACK、Xebec S1410の6バイト
+  コマンドセット、READ/WRITE、FORMAT、REQUEST SENSE、診断/READ LONG/
+  WRITE LONG、A8h/A9h BIOS窓、raw HDFの保存）。後期SCSIのINQUIRY、
+  MODE SELECT/SENSE、START/STOPはSASI機へ推測で追加せず、不正コマンドを返す
+- MZ-2000/MZ-80B互換モード。背面起動セレクタ、Z80 4MHz、262走査線・
+  60.99Hz、B7hメモリモード、E8h互換VRAM窓、F4h〜F7hのモード別機能、
+  640×200カラー/320×200グリーン表示を実装。利用者所有のMZ-2500
+  IPL/KANJI ROMが必要で、MZ-2000/MZ-80B本体のIPL/CG ROMは使用しません。
+  ROM構成はEmuZ-2500のバイナリを外から比較して確認しました。現時点の
+  検証はIPL無媒体起動と、レジスタ・メモリ・描画の単体試験まで
+- 同一インスタンスでの再起動。CPU/周辺デバイスのRESET対象と、RAM・VRAM・
+  PCG・RTC・EMMなど保持する記憶を分離し、OPN/Y8950、G-CRTC、CRTC、
+  PPI/PIO/SIO、8253、外側ラッチを共通RESETへ戻します。資料で確定できない
+  RESET値には実機値と断定しない中立互換ベースラインを使い、実IPLはそこから
+  ROM自身に初期化させます。ダミーIPLだけが実IPLトレース済みの引渡し値を適用します
 
-MZ-1E35 / MZ-1R37 はどちらも「ハードウェア構成」パネルで取り外し可能です
-（既定 ON）。プリンタ (FEh/FFh)、CMT デッキ、SASI (A4h/A5h, A8h/A9h)、
-SIO 送信・ボーレート切替 (CDh, B0h-B3h)、TV コントロール出力 (AFh W) は
-未実装のまま（未使用ポートはログして無視）。将来拡張の設計余地は
-モジュール構造で確保しています。
+MZ-1E35 / MZ-1R37 / MZ-1E30 は「ハードウェア構成」パネルで取り外し可能です
+（既定 ON）。F6h bit3 MGはモノクロ映像端子への重畳指定であり、現在のRGBA
+カラー出力には対応する別端子がありません。CMTのアナログ音声トラック、
+MZ-1E35基板固有のGPIO用途・入力ゲイン・フィルタ・OPNとの抵抗ミックス比、
+TV/電話/音声合成オプション、SIOの同期式を実機コネクタまで再現する経路は、
+未実装または一次資料/実測待ちです。プリンタは文字やESC/Pを解釈せず、SASIは
+セクタイメージ単位であり電気的なバス競合までは扱いません。SASIコマンド範囲は
+[Xebec S1410 Owner's Manual, Rev. C-1](https://bitsavers.org/pdf/xebec/Xebec_S1410/104524C_S1410Man_Aug83.pdf)
+を一次資料にしています。詳細と実装追跡は
+[`docs/research/super-mz-unimplemented-audit.md`](https://github.com/zabaglione/mz2500-web-emulator/blob/main/docs/research/super-mz-unimplemented-audit.md)
+に記録しています。互換モードのROM構成は
+[`docs/research/emuz-compat-rom-blackbox.md`](https://github.com/zabaglione/mz2500-web-emulator/blob/main/docs/research/emuz-compat-rom-blackbox.md)
+に、EmuZ内部を参照しない比較条件と未確認境界を記録しています。
+
+CMTの3桁カウンターは、現在位置をテープ全長に対して`000`〜`999`へ換算する
+簡易表示です。実機のリール径や巻き取り量に伴う回転数の非線形変化は再現して
+いません。
 
 ## ビルド
 
@@ -79,9 +123,11 @@ OPNレジスタトレース等を備えたヘッドレス回帰用フロント�
 
 - 実装は標準チップのデータシート（MB8877 / i8253 / Z80 PIO / YM2203）と
   自作ゲーム開発で蓄積した機種ドキュメントに基づく新規実装。
-  **EmuZ-2500（Common Source Code Project, GPL-2.0）はバイナリ実行による
-  ブラックボックス検証オラクルとしてのみ使用**し、コード・データは一切
-  取り込んでいません。
+- **EmuZ-2500（Common Source Code Project, GPL-2.0）は、内部実装を参照せず、
+  バイナリ実行結果だけを比較するゴールドマスターとして使用**します。
+  公開する実装・仕様判断にCSCPのソースコード、データ、生成物は使用しません。
+- MZ-2000/MZ-80B互換モードの実装根拠はSHARPの取扱説明書とI/O資料で、
+  EmuZ-2500とは画面・I/O・起動結果を外部から比較します。
 - FDC タイミングは EmuZ との黒箱比較で校正し、ブート・ロードの
   マイルストーンがフレーム単位で一致。
 - タイトル画面・ロード画面は EmuZ 出力と **100.00% ピクセル一致**。
@@ -101,8 +147,11 @@ SPACE = 決定/ジャンプ、カーソル = 移動、Z = ダッシュ。
   マルチボリュームD88の自動分割とボリューム切替（2枚組以上対応）
 - **ブラウザ内保存**: 入れたディスク・登録したROM・ハードウェア構成は
   IndexedDB/localStorageに保存（外部送信なし）
-- **ROMスロット**: 手持ちの ipl/cg/kanji/dict.rom を登録可能。ipl.rom登録時は
-  実IPLブート（実験的）を選択できる。kanji=バンク39h窓、dict=バンク3Ah窓に結線
+- **ROMスロット**: 手持ちの ipl/kanji/dict.rom とSASI BIOSを登録可能。
+  ipl.rom登録時は実IPLブート（実験的）を選択できる。kanji=バンク39h窓と
+  互換モード文字、dict=バンク3Ah窓、SASI BIOS=A8h/A9hに結線
+- **互換起動セレクタ**: MZ-2500 / MZ-2000 / MZ-80Bを選択してRESET。
+  互換モードではMZ-2500実IPL/KANJI ROMをブラウザ内ROMスロットから使用
 - **ハードウェア構成**: 拡張RAM(256KB)・拡張GRAM(第2画面)・MZ-1M10(4096色)の
   有無をオプションとして設定可能（実機のボード構成を再現）
 - **デバッグパネル**: CPU/バンクマップ/GDE/FDC/割込のライブ表示と
@@ -142,4 +191,6 @@ AIエージェント（Claude Code等）がキー入力・画面テキスト読�
   自由に再配布せず、本リポジトリ/公開ページからの利用にとどめてください
 
 謝辞: EmuZ-2500 / Common Source Code Project（武田俊也氏）、
-claude-famicom-emu（GOROman氏）。
+claude-famicom-emu（GOROman氏）。MZ-2500のI/O仕様の確認では、
+[紅茶羊羹さんのMZ-2500資料](http://www.maroon.dti.ne.jp/youkan/mz2500/index.html)を
+参考にさせていただきました。

@@ -32,11 +32,23 @@ public:
     uint8_t read_status(uint64_t now);
     uint8_t read_data();
 
-    // SSG I/O port B (register 0Fh) carries the machine's boot-device sense
-    // lines. Measured on a real-ROM boot: 3Fh with a floppy interface
-    // present (bits 0-5 pulled high). The firmware reads it through its
-    // routine at 7EC1h and derives the boot source from bits 4-6.
-    void set_port_b_input(uint8_t value) { port_b_input_ = value; }
+    // External SSG pins. Port B carries the machine's boot-device sense
+    // lines; 3Fh is the measured input with a floppy interface present.
+    // ymfm applies register 07h's input/output direction before it calls
+    // these pins, so an output port reads its own data latch instead.
+    void set_port_a_input(uint8_t value) { port_input_[0] = value; }
+    void set_port_b_input(uint8_t value) { port_input_[1] = value; }
+    uint8_t port_a_pins() const {
+        return (io_direction_ & 0x40) ? port_latch_[0] : port_input_[0];
+    }
+    uint8_t port_b_pins() const {
+        return (io_direction_ & 0x80) ? port_latch_[1] : port_input_[1];
+    }
+    bool port_a_is_output() const { return (io_direction_ & 0x40) != 0; }
+    // Native-IPL handoff helper: establish the SSG mixer/direction register
+    // and port A latch without adding synthetic writes to the program's OPN
+    // trace. These are firmware values, not chip power-on defaults.
+    void set_ssg_io_handoff(uint8_t mixer, uint8_t port_a);
     void write_address(uint8_t value, uint64_t now);
     void write_data(uint8_t value, uint64_t now);
 
@@ -52,8 +64,8 @@ public:
     // debug mixing controls (CLI layer-isolation tests)
     void set_layer_gains(float fm, float ssg) { fm_mix_ = fm; ssg_mix_ = ssg; }
 
-    // 1-bit beeper line (the firmware's error tone on port CAh); mixed into
-    // the output stream at the caller's flush timing
+    // 1-bit beeper line (8255 port C bit2 at E2h); mixed into the output
+    // stream at the caller's flush timing
     void set_beeper_level(bool on) { beeper_ = on ? 0.08f : 0.0f; }
 
     // Analog output-stage voicing: the real YM2203 synthesizes FM at
@@ -68,6 +80,10 @@ public:
         busy_end_ = now_ + (uint64_t)clocks * 3;
     }
     bool ymfm_is_busy() override { return now_ < busy_end_; }
+    void ymfm_set_timer(uint32_t tnum, int32_t duration_in_clocks) override;
+    uint8_t ymfm_external_read(ymfm::access_class type, uint32_t address) override;
+    void ymfm_external_write(ymfm::access_class type, uint32_t address,
+                             uint8_t data) override;
 
 private:
     // RBJ-cookbook low-pass biquad (direct form 1)
@@ -90,12 +106,16 @@ private:
     uint64_t generated_ = 0;             // chip samples generated so far
     uint64_t now_ = 0;
     uint64_t busy_end_ = 0;
+    static constexpr uint64_t NEVER = ~0ULL;
+    uint64_t timer_due_[2] = {NEVER, NEVER};
     uint8_t address_ = 0;
 
     float fm_mix_ = 1.0f;
     float ssg_mix_ = 1.0f;
     float beeper_ = 0.0f;
-    uint8_t port_b_input_ = 0x3F;
+    uint8_t port_input_[2] = {0x00, 0x3F};
+    uint8_t port_latch_[2] = {};
+    uint8_t io_direction_ = 0;
     uint32_t fm_lpf_hz_ = 5000;
     Biquad fm_lp1_, fm_lp2_;
 
@@ -110,6 +130,7 @@ private:
     FILE* trace_ = nullptr;
 
     void design_filters();
+    void generate_to(uint64_t now);
     void push_chip_sample(float mono);
 };
 

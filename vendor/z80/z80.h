@@ -14,6 +14,7 @@ struct z80 {
   // required by hardware that decodes A8-A15 (e.g. MZ-1M10 palette at port AEh)
   uint8_t (*port_in)(z80*, uint16_t);
   void (*port_out)(z80*, uint16_t, uint8_t);
+  void (*reti)(z80*);
   void* userdata;
 
   unsigned long cyc; // cycle count (t-states)

@@ -47,7 +47,7 @@ Claude Code等への登録例（`.mcp.json`）:
 ```
 
 **ROM・BASICディスクは同梱していない**。利用者所有のファイルをパスで指定する
-（`ipl.rom`/`cg.rom`/`kanji.rom`/`dict.rom` とブートディスクのD88）。
+（`ipl.rom`/`kanji.rom`/`dict.rom` とブートディスクのD88）。
 ROM無しでも、同梱デモディスクのダミーIPLブートだけは動く。
 
 ## できること（ツール群の概要）

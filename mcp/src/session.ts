@@ -24,7 +24,6 @@ export class Session {
     const session = new Session(emu, config);
 
     if (config.iplRom) emu.loadRom("ipl", config.iplRom);
-    if (config.cgRom) emu.loadRom("cg", config.cgRom);
     if (config.kanjiRom) emu.loadRom("kanji", config.kanjiRom);
     if (config.dictRom) emu.loadRom("dict", config.dictRom);
     if (config.diskA) emu.insertDisk(0, config.diskA);

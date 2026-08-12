@@ -63,6 +63,34 @@ constexpr int TEXT_WIN_LINE0 = 17;
 // 256C, bit2 V200, bit1 H640, bit0 PRI.
 inline bool gde_v200(uint8_t gmode) { return (gmode & 0x04) != 0; }
 
+// Resolve a G-CRTC plane address to one of the physical 8KB GRAM banks.
+// Keeping this mapping shared is important: display fetches, hardware clear,
+// and CPU-visible effects must agree on EX and 640x400 bank selection.
+inline int gde_plane_bank(int plane, uint32_t address, uint8_t mode) {
+    const int quarter = (address >> 13) & 3;
+    const bool v200 = gde_v200(mode);
+    const bool h640 = (mode & 0x02) != 0;
+    const bool cg4 = !(mode & 0x10) && !v200 && h640;
+
+    if (v200 && (mode & 0x80)) return 0x28 + plane * 2 + (quarter & 1);
+    if (quarter < 2) return 0x20 + plane * 2 + quarter;
+    if (cg4) return 0x24 + plane * 2 + (quarter - 2);
+    return 0x28 + plane * 2 + (quarter - 2);
+}
+
+// SAD0 addresses the first raster of the scrolling area. After SLN1
+// rasters, the controller starts a separate fixed area at SAD2, so its line
+// offset restarts at zero rather than continuing to count from the top of
+// the screen. SAD1 is the last address in the scroll ring.
+inline uint32_t gde_row_address(uint32_t display_line, uint32_t stride,
+                                uint32_t sad0, uint32_t sad1, uint32_t sad2,
+                                uint32_t sln1) {
+    const uint32_t ring = sad1 + 1u;
+    if (display_line < sln1)
+        return (sad0 + stride * display_line) % ring;
+    return (sad2 + stride * (display_line - sln1)) % ring;
+}
+
 // Is the graphics layer being displayed at all? Oh!MZ's hardware analysis
 // lists the mode-bit combinations that are real modes (15h/14h 320x200x16,
 // 1Dh 320x200x256, 17h 640x200x16, 03h 640x400x4, 93h 640x400x16, and the

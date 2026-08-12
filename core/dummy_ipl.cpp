@@ -21,6 +21,62 @@
 
 namespace mz {
 
+void Mz2500::reset_peripherals_for_boot() {
+    fdc_.reset();
+    opn_.reset();
+    update_boot_sense_inputs();
+    adpcm_.reset();
+    opn_addr_ = 0;
+    std::memset(opn_regs_, 0, sizeof(opn_regs_));
+    std::memset(fm_keyon_, 0, sizeof(fm_keyon_));
+
+    mouse_.reset();
+    sio_.reset();
+    sio_dtr_[0] = sio_dtr_[1] = false;
+    write_sio_clock_control(0);
+
+    pit_counting_ = false;
+    for (auto& channel : pit_) channel = PitChannel{};
+    pit_next_fire_ = 0;
+    for (auto& pending : int_pending_) pending = false;
+    for (auto& vector : int_vectors_) vector = 0;
+    int_select_ = 0;
+    tick_next_[0] = tick_next_[1] = 0;
+    last_vblank_frame_ = ~0ULL;
+
+    pio_a_ = 0;
+    std::memset(pio_ctrl_, 0, sizeof(pio_ctrl_));
+    std::memset(ppi_, 0, sizeof(ppi_));
+    ppi_control_ = 0x9B; // 8255 reset: all ports input
+    cmt_.reset(0);       // media and head position survive RESET; motor stops
+    printer_.reset(0);   // external output already accepted survives RESET
+    sasi_.reset_machine(); // target media and option ROM survive RESET
+    bank_mode_ = 0;
+    compat_vram_control_ = 0;
+    compat_background_ = 0;
+    compat_text_colour_ = 7;
+    compat_graphics_mask_ = 0;
+    joy_enable_ = 0;
+    joy_mask_ = 0;
+
+    crtc_index_ = 0;
+    font_size_ = 0;
+    std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
+    crtc_vwin_written_ = false;
+    crtc_hwin_written_ = false;
+    cg_mask_ = 0;
+
+    std::memset(gde_regs_, 0, sizeof(gde_regs_));
+    gde_index_ = 0;
+    gde_autoinc_ = false;
+    gde_busy_until_ = 0;
+    std::memset(gvram_latch_, 0, sizeof(gvram_latch_));
+    for (auto& line : raster_line_) line = RasterLineState{};
+    cpu_half_cycle_ = 0;
+    step_external_wait_ = 0;
+    cpu_step_active_ = false;
+}
+
 bool Mz2500::boot_from_disk() {
     D88Disk& boot_disk = disks_[0]; // the IPL boots from drive FD1
     if (!boot_disk.loaded()) {
@@ -38,44 +94,19 @@ bool Mz2500::boot_from_disk() {
         return false;
     }
 
-    mem_.clear(); // main RAM, VRAM, PCG all zero
-    fdc_.reset();
-    opn_.reset();
-    mouse_.reset(); // no pending movement/buttons must survive a reboot
-    // The DTR edge-tracking state must also start fresh: if it stayed at
-    // whatever level the driver last left it before the reboot, the first
-    // post-reboot write to reach that same level would be seen as "no
-    // edge" and swallow the driver's first packet request.
-    sio_dtr_[0] = sio_dtr_[1] = false;
-    // A three-byte mouse packet queued but not yet drained (e.g. the driver
-    // strobed DTR, then the host reset mid-frame before reading all three
-    // bytes back) must not survive a reboot either: the fresh driver's first
-    // read of channel B would get the OLD packet's leftover byte(s) instead
-    // of its own, desynchronising its packet phase for however long it takes
-    // to notice.
-    sio_[0].rx_head = sio_[0].rx_tail = 0;
-    sio_[1].rx_head = sio_[1].rx_tail = 0;
-    pit_counting_ = false;
-    for (auto& c : pit_) c = PitChannel{};
-    for (auto& p : int_pending_) p = false;
-    for (auto& v : int_vectors_) v = 0;
-    tick_next_[0] = tick_next_[1] = 0;
-    pio_a_ = 0;
-    joy_mask_ = 0;
-    std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
+    mem_.clear(); // native bootstrap policy: clear main RAM, VRAM, and PCG
+    reset_peripherals_for_boot();
+
+    // The native bootstrap replaces firmware which programs the 8255 to
+    // MZ-2500 mode: A and both halves of C output, B input (82h).
+    ppi_control_ = 0x82;
+    update_ppi_outputs();
     // CRTC reg 00h as real firmware leaves it: 25 rows, one text
     // page, 8-colour text over 16-colour graphics.
     crtc_regs_[0x00] = 0x05;
-    // ...and with it the record of who owns the text display windows: a
-    // freshly reset CRTC register file has never been programmed, so the
-    // renderer shows the full screen rather than the shut window that
-    // SL = EL / SC = EC would otherwise mean (core/renderer.cpp).
-    crtc_vwin_written_ = false;
-    crtc_hwin_written_ = false;
     // port F6h graphic mask: all three guns on, matching what the real IPL
     // leaves behind.
     cg_mask_ = 0x07;
-    std::memset(gde_regs_, 0, sizeof(gde_regs_));
     // MZ-1M10 palette RAM as the firmware leaves it (core/mz1m10.h). It is
     // not cleared: the board keeps whatever was written to it, and the
     // firmware writes a full table on the way through, so a program that
@@ -90,7 +121,13 @@ bool Mz2500::boot_from_disk() {
     // board (one running in its "no palette board" mode, say) shows the
     // fixed digital colours rather than the table above.
     palette_written_ = false;
-    std::memset(opn_regs_, 0, sizeof(opn_regs_));
+    // This path skips the real firmware, so provide the handoff observed
+    // from a real-ROM boot: mixer/direction 7Fh (port A output, port B input)
+    // and port A 04h (digital palette). Keep these platform bootstrap writes
+    // out of the program-write trace.
+    opn_.set_ssg_io_handoff(0x7F, 0x04);
+    opn_regs_[0x07] = 0x7F;
+    opn_regs_[0x0E] = 0x04;
 
     const uint8_t payload_bank = header[0x20] & 0x3F;
     uint8_t* dest = mem_.bank_ptr(payload_bank);
@@ -115,10 +152,12 @@ bool Mz2500::boot_from_disk() {
     cpu_.write_byte = cb_write;
     cpu_.port_in = cb_in;
     cpu_.port_out = cb_out;
+    cpu_.reti = cb_reti;
     cpu_.userdata = this;
     cpu_.pc = static_cast<uint16_t>(header[0x18] | (header[0x19] << 8));
     frame_origin_ = 0;
     frames_ = 0;
+    cpu_half_cycle_ = 0;
     idle_frames_remaining_ = boot_delay_frames_;
 
     if (trace_boot_) {
@@ -139,56 +178,19 @@ bool Mz2500::boot_with_real_ipl() {
         return false;
     }
 
-    mem_.clear(); // RAM/VRAM/PCG zero; the ROM banks survive
-    fdc_.reset();
-    opn_.reset();
-    mouse_.reset(); // no pending movement/buttons must survive a reboot
-    // The DTR edge-tracking state must also start fresh: if it stayed at
-    // whatever level the driver last left it before the reboot, the first
-    // post-reboot write to reach that same level would be seen as "no
-    // edge" and swallow the driver's first packet request.
-    sio_dtr_[0] = sio_dtr_[1] = false;
-    // A three-byte mouse packet queued but not yet drained (e.g. the driver
-    // strobed DTR, then the host reset mid-frame before reading all three
-    // bytes back) must not survive a reboot either: the fresh driver's first
-    // read of channel B would get the OLD packet's leftover byte(s) instead
-    // of its own, desynchronising its packet phase for however long it takes
-    // to notice.
-    sio_[0].rx_head = sio_[0].rx_tail = 0;
-    sio_[1].rx_head = sio_[1].rx_tail = 0;
-    pit_counting_ = false;
-    for (auto& c : pit_) c = PitChannel{};
-    for (auto& p : int_pending_) p = false;
-    for (auto& v : int_vectors_) v = 0;
-    tick_next_[0] = tick_next_[1] = 0;
-    pio_a_ = 0;
-    joy_mask_ = 0;
-    std::memset(crtc_regs_, 0, sizeof(crtc_regs_));
-    // CRTC reg 00h as real firmware leaves it: 25 rows, one text
-    // page, 8-colour text over 16-colour graphics.
-    crtc_regs_[0x00] = 0x05;
-    // ...and with it the record of who owns the text display windows: a
-    // freshly reset CRTC register file has never been programmed, so the
-    // renderer shows the full screen rather than the shut window that
-    // SL = EL / SC = EC would otherwise mean (core/renderer.cpp).
-    crtc_vwin_written_ = false;
-    crtc_hwin_written_ = false;
-    // port F6h graphic mask: all three guns on, matching what the real IPL
-    // leaves behind.
-    cg_mask_ = 0x07;
-    std::memset(gde_regs_, 0, sizeof(gde_regs_));
-    // The palette board keeps its contents across a reset; on this path the
-    // firmware about to run programs the table itself, so seeding it with
-    // the same table (core/mz1m10.h) only makes the two boot paths agree.
-    mz1m10_firmware_palette(palette_);
-    // ...and the flag that says a program has written the board, which the
-    // renderer needs before it routes the screen through the RGB444
-    // entries. A reboot must clear it, or a program that never touches the
-    // board would inherit the previous one's palette selection.
-    palette_written_ = false;
-    std::memset(opn_regs_, 0, sizeof(opn_regs_));
-    int_select_ = 0;
-    mem_.set_kanji_bank(0);
+    // RESET changes the memory-controller latches, not RAM cells. The real
+    // IPL now gets to perform its own RAM test and optional GRAM/PCG setup;
+    // this also preserves the documented reset-without-GRAM-clear path.
+    mem_.reset_control();
+    reset_peripherals_for_boot();
+
+    // Do not pre-apply values observed at the end of firmware startup here.
+    // CRTC 00h=05h, F6h=07h, 8255=82h, and OPN 07h/0Eh are firmware handoff
+    // state. A real-ROM boot starts from the neutral device baseline above
+    // and lets the ROM perform those writes in emulated time.
+    // MZ-1M10 palette RAM is not on the CPU RESET line. Keep both its bytes
+    // and the fact that it has been programmed; the real IPL may overwrite
+    // the table, but the machine core must not do that before the ROM runs.
 
     // hardware reset bank map: IPL ROM at 0000-7FFF, RAM 04-07 above
     static const uint8_t reset_map[8] = {0x34, 0x35, 0x36, 0x37, 0x04, 0x05, 0x06, 0x07};
@@ -199,10 +201,12 @@ bool Mz2500::boot_with_real_ipl() {
     cpu_.write_byte = cb_write;
     cpu_.port_in = cb_in;
     cpu_.port_out = cb_out;
+    cpu_.reti = cb_reti;
     cpu_.userdata = this;
     cpu_.pc = 0x0000;
     frame_origin_ = 0;
     frames_ = 0;
+    cpu_half_cycle_ = 0;
     idle_frames_remaining_ = 0; // the real firmware takes its real time
 
     if (trace_boot_) std::fprintf(stderr, "[ipl] real IPL boot, PC=0000h\n");

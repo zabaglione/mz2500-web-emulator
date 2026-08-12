@@ -81,15 +81,16 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## 参照実装への謝辞（コード不使用）
+## 参照実装への謝辞（コード非取込）
 
 - **EmuZ-2500 / Common Source Code Project**（武田俊也氏、GPL-2.0）:
-  ハードウェア挙動の検証オラクル（バイナリ実行によるブラックボックス比較）として
-  のみ使用。**コード・データは本プロジェクトに一切含まれません**（クリーンルーム方針）。
+  内部実装を参照せず、バイナリ実行結果だけを比較するゴールドマスターとして使用。
+  **CSCPのソースコード・データ・生成物は本プロジェクトの実装や仕様判断に
+  使用せず、本プロジェクトにも含みません**。
 - **claude-famicom-emu**（GOROman氏、MIT）: C++ → Emscripten/WASM + JS という
   構成コンセプトの参照。コードは使用していません。
 
 ## ROM について
 
-SHARP MZ-2500 の本体 ROM（IPL / CG / 漢字 / 辞書 / BASIC）は**一切使用・同梱していません**。
+SHARP MZ-2500 の本体 ROM（IPL / 漢字 / 辞書 / BASIC）は**一切使用・同梱していません**。
 ブート処理はホスト側ネイティブコードによる代替実装（`core/dummy_ipl.cpp`）です。

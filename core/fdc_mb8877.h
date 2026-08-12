@@ -12,8 +12,9 @@
 // re-looked-up on every byte so a hot disk swap can never leave a
 // dangling pointer.
 //
-// Timing is a coarse model in CPU cycles (6 MHz): 32 us per data byte
-// (250 kbps MFM), plus FIXED per-READ and per-seek-step latencies
+// Timing is a coarse model in CPU cycles (6 MHz): 32 us per MFM data byte
+// (250 kbps) or 64 us per FM byte (125 kbps), plus fixed per-READ and
+// per-seek-step latencies
 // calibrated black-box against EmuZ-2500 so the game's load-driven state
 // transitions land on the same frame numbers. Late data-register reads
 // never lose data, which is lenient vs. real hardware but safe for
@@ -35,7 +36,9 @@ class FdcMb8877 {
 public:
     static constexpr int NUM_DRIVES = 2;
 
-    static constexpr uint64_t CYC_PER_BYTE = 192;       // 32 us
+    static constexpr uint64_t CYC_PER_BYTE_MFM = 192;   // 32 us, 250 kbps
+    static constexpr uint64_t CYC_PER_BYTE_FM = 384;    // 64 us, 125 kbps
+    static constexpr uint64_t CYC_PER_BYTE = CYC_PER_BYTE_MFM;
     static constexpr uint64_t CYC_PER_REV = 1'200'000;  // 200 ms (300 rpm)
     static constexpr uint64_t CYC_PER_STEP = 18'000;    // 3 ms
 
@@ -68,6 +71,8 @@ public:
 
     void write_drive(uint8_t value); // port DCh (bit7 motor, low bits drive)
     void write_side(uint8_t value);  // port DDh
+    void set_single_density(bool single) { single_density_ = single; }
+    bool single_density() const { return single_density_; }
 
     bool motor_on() const { return motor_; }
     int selected_drive() const { return drive_; }
@@ -114,10 +119,17 @@ private:
     void advance_readaddr_realtime(uint64_t now);
     void advance_writetrack_realtime(uint64_t now);
     void advance_readtrack_realtime(uint64_t now);
-    uint64_t byte_ready(int index) const { return read_start_ + (uint64_t)index * CYC_PER_BYTE; }
+    uint64_t byte_cycles() const {
+        return command_single_density_ ? CYC_PER_BYTE_FM : CYC_PER_BYTE_MFM;
+    }
+    uint64_t byte_ready(int index) const {
+        return read_start_ + (uint64_t)index * byte_cycles();
+    }
     const uint8_t* active_sector() const {
         const D88Disk* d = disks_[read_drive_];
-        return d ? d->raw_sector(read_cyl_, read_side_, read_sector_) : nullptr;
+        return d ? d->raw_sector(read_cyl_, read_side_, read_sector_,
+                                 command_single_density_)
+                 : nullptr;
     }
     // Whether the sector READ SECTOR is currently (or about to be) serving
     // carries the deleted-data mark WRITE SECTOR's a0 flag left on it. Read
@@ -126,7 +138,8 @@ private:
     // renders as F8h vs FBh.
     bool active_sector_deleted() const {
         const D88Disk* d = disks_[read_drive_];
-        return d && d->deleted_mark(read_cyl_, read_side_, read_sector_);
+        return d && d->deleted_mark(read_cyl_, read_side_, read_sector_,
+                                    command_single_density_);
     }
     // Last direction a STEP command moved the head, so a bare STEP repeats it.
     int step_dir_ = 1;
@@ -153,6 +166,10 @@ private:
     int side_ = 0;
     int drive_ = 0;
     bool motor_ = false;
+    bool single_density_ = false;
+    // DEh is sampled when a Type II/III command starts. A mid-transfer port
+    // write affects the next command, not the record or bit rate in flight.
+    bool command_single_density_ = false;
 
     uint64_t busy_until_ = 0;
 
@@ -184,7 +201,9 @@ private:
     // active WRITE SECTOR
     uint8_t* write_target() {
         D88Disk* d = disks_[read_drive_];
-        return d ? d->write_sector(read_cyl_, read_side_, read_sector_) : nullptr;
+        return d ? d->write_sector(read_cyl_, read_side_, read_sector_,
+                                   command_single_density_)
+                 : nullptr;
     }
     bool write_multiple_ = false;
     bool read_multiple_ = false;
@@ -193,7 +212,7 @@ private:
     // Same idea as read_last_access_, for the write side (advance_write_realtime()).
     uint64_t write_last_access_ = 0;
     uint64_t byte_due(uint64_t start, int index) const {
-        return start + (uint64_t)index * CYC_PER_BYTE;
+        return start + (uint64_t)index * byte_cycles();
     }
 
     // active READ ADDRESS: the six ID bytes and how many have been taken
@@ -222,7 +241,12 @@ private:
     // sectors when the track's worth of bytes has gone by
     std::vector<uint8_t> track_stream_;
     int track_index_ = 0;
-    static constexpr int TRACK_STREAM_BYTES = 6250; // one 250kbps revolution
+    static constexpr int TRACK_STREAM_BYTES_MFM = 6250;
+    static constexpr int TRACK_STREAM_BYTES_FM = 3125;
+    int track_stream_bytes() const {
+        return command_single_density_ ? TRACK_STREAM_BYTES_FM
+                                       : TRACK_STREAM_BYTES_MFM;
+    }
     void commit_track_stream();
     // Cycle of the most recent register-3 write during this WRITE TRACK,
     // seeded to write_start_ at command issue; advance_writetrack_realtime()'s

@@ -5,7 +5,9 @@
 // (docs/mz2500-highspeed-scroll-knowhow.md) and the game's init sequences in
 // games/neko_can_run/src/neko.asm; ambiguities (plane order, glyph bit
 // order, digital palette hue order) are calibrated black-box against
-// EmuZ-2500 screenshots. No emulator code was consulted.
+// EmuZ-2500 screenshots. The legacy compatibility paths are based on Sharp
+// documentation and are checked only through external, black-box EmuZ runs.
+// No CSCP internal implementation, source code, or data is used here.
 //
 // Layout facts used here:
 //   text VRAM (bank 38h): row stride = column count (80 or 40 bytes,
@@ -61,113 +63,104 @@ inline int compose256(int pal0, int c1, uint8_t reg0a) {
 
 } // namespace
 
-void Mz2500::render(uint8_t* rgba) const {
-    // --- resolve the 16-colour output palette -------------------------------
-    // OPN GPIO port A (register 0Eh) bit2: 0 selects the MZ-1M10 RGB444
-    // palette, 1 the digital palette (used during FDC access windows).
-    // A machine with no palette board - and one whose board has never been
-    // programmed, like BASIC-M25, which drives the digital palette only -
-    // shows the fixed IGRB colours.
-    const bool rgb444 =
-        mz1m10_present_ && palette_written_ && (opn_regs_[0x0E] & 0x04) == 0;
-    uint8_t pal_r[16], pal_g[16], pal_b[16];
-    for (int i = 0; i < 16; i++) {
-        if (rgb444 && i != 0) {
-            // nibble << 4 expansion, matching EmuZ output byte-for-byte so
-            // screenshot regressions can demand exact equality. Colour 0 is
-            // wired to black on the MZ-1M10 and takes no palette entry.
-            const uint8_t even = palette_[i * 2];     // (R<<4) | B
-            const uint8_t odd = palette_[i * 2 + 1];  // G
-            pal_r[i] = static_cast<uint8_t>(((even >> 4) & 0x0F) << 4);
-            pal_g[i] = static_cast<uint8_t>((odd & 0x0F) << 4);
-            pal_b[i] = static_cast<uint8_t>((even & 0x0F) << 4);
-        } else if (rgb444) {
-            pal_r[i] = pal_g[i] = pal_b[i] = 0;
-        } else if (i == 8) {
-            // The fixed 16 colours are 0 and 9-15 at full level, 1-7 at a
-            // half level, and colour 8 alone a darker grey - not, as bit3
-            // alone would suggest, an "intense black". The firmware's own
-            // MZ-1M10 table settles the ordering: it writes component level
-            // 7 for colours 1-7, 3 for colour 8 and 15 for 9-15, so 8 sits
-            // below the half level. (EmuZ-2500 renders it at 152, above the
-            // half level, which contradicts that table.)
-            pal_r[i] = pal_g[i] = pal_b[i] = 95;
-        } else {
-            // digital palette: bit3 = intensity, bit2..0 = G/R/B.
-            // Half level measured off EmuZ's BASIC-M25 screen (127, not 160).
-            const int hi = (i & 0x08) ? 255 : 127;
-            pal_g[i] = (i & 0x04) ? hi : 0;
-            pal_r[i] = (i & 0x02) ? hi : 0;
-            pal_b[i] = (i & 0x01) ? hi : 0;
+void Mz2500::render_compat_line(uint8_t* row, int y, int mode) const {
+    const RasterLineState& state = raster_line_[y];
+    const uint8_t* tvram = mem_.bank_ptr(0x38);
+    const std::vector<uint8_t>& kanji = mem_.kanji_rom();
+    const bool text80 = (state.pio_a & 0x20) != 0;
+    const int columns = text80 ? 80 : 40;
+    const bool force_blank = (state.ppi_control & 0x01) == 0 &&
+                             (state.ppi_c & 0x01) != 0;
+    const bool reverse_mono = mode == 2 &&
+                              (state.ppi_control & 0x10) == 0 &&
+                              (state.ppi_a & 0x10) == 0;
+
+    auto font_byte = [&](uint8_t code, int line) -> uint8_t {
+        // Compatibility text uses the MZ-2500 kanji ROM. Black-box EmuZ
+        // runs produce identical frames with and without a separate CG ROM,
+        // while removing the kanji ROM changes both legacy-mode outputs.
+        const size_t embedded = 0x6018 + static_cast<size_t>(code) * 32 + line;
+        return embedded < kanji.size() ? kanji[embedded] : 0;
+    };
+    auto plane_byte = [&](int plane, uint16_t address) -> uint8_t {
+        const int bank = 0x20 + plane * 2 + (address >> 13);
+        return mem_.bank_present(bank)
+            ? mem_.bank_ptr(bank)[address & 0x1FFF] : 0;
+    };
+
+    const int sy = y >> 1;
+    const int text_line = sy & 7;
+    const int text_row = sy >> 3;
+    for (int x = 0; x < 640; x++) {
+        const int tx = text80 ? x : (x >> 1);
+        const int cell = tx >> 3;
+        bool text_on = false;
+        if (cell < columns && text_row < 25) {
+            const uint8_t code = tvram[text_row * columns + cell];
+            const uint8_t glyph = font_byte(code, text_line);
+            text_on = ((glyph >> (7 - (tx & 7))) & 1) != 0;
         }
-    }
 
-    // --- CG layer state ------------------------------------------------------
-    // Mode register 0Eh. The I/O map names the bits: bit7 EX (fetch the
-    // display from the expansion VRAM, ignored in 640x400), bit4 4C (clear
-    // = 4 colours), bit3 256C, bit2 V200, bit1 H640, bit0 PRI (which of two
-    // superimposed screens is in front). Oh!MZ's hardware analysis lists
-    // the combinations that are real modes:
-    //   15h/14h 320x200x16   1Dh 320x200x256   17h 640x200x16
-    //   03h 640x400x4        93h 640x400x16    (95h/94h/9Dh/97h: EX set)
-    // No listed mode is 400 lines at 320 dots, and EmuZ blanks the screen
-    // for one, so 400 lines implies 640 dots here too.
-    const uint8_t gmode = gde_regs_[0x0E];
-    const bool h640 = (gmode & 0x02) != 0;
-    const bool v200 = gde_v200(gmode);
-    // 4-colour mode exists so that a machine with no MZ-1R27 can still run
-    // 640x400: the missing expansion B and R planes are replaced by the
-    // standard G and I planes, and the picture keeps only 2 bits per pixel.
-    const bool cg4 = !(gmode & 0x10) && !v200 && h640;
-    // 256 colours is a 320-wide, 200-line geometry only (modes 1Dh/9Dh).
-    const bool cg256 = (gmode & 0x18) == 0x18 && v200 && !h640;
-    // 320x200 16 colours is the one mode that carries two whole screens in
-    // the standard VRAM and can show them at once: Oh!MZ's capability table
-    // lists it as "2 pages (superimposable)" where 640x200 and 640x400 get
-    // one, and the I/O map's PRI bit (0Eh bit0) is documented as the
-    // priority "when superimposing two screens (320x200 16-colour mode
-    // only)". The second screen sits one 8KB screen above the first, which
-    // is the same pairing 256-colour mode uses for its extra four planes.
-    // PRI 1 puts the lower-numbered screen in front, 0 puts it behind.
-    const bool cg2page = !h640 && v200 && !cg256 && (gmode & 0x10) != 0;
-    const bool page0_front = (gmode & 0x01) != 0;
-    const bool cg_on = gde_cg_on(gmode); // core/gcrtc.h - the wait model agrees
-    const uint16_t gdevs = reg16(gde_regs_, 0x08);
-    const uint16_t gdeve = reg16(gde_regs_, 0x0A);
-    const int win_unit = h640 ? 8 : 4; // window regs step 8 dots at 640 wide
-    const int cg_stride = h640 ? 80 : 40;
-    const int hdsc = gde_regs_[0x0F] & 7;
-    const uint16_t sad0 = reg16(gde_regs_, 0x10);
-    const uint16_t sad1 = reg16(gde_regs_, 0x12);
-    const uint16_t sad2 = reg16(gde_regs_, 0x14);
-    const uint16_t sln1 = reg16(gde_regs_, 0x16);
-    const uint8_t plane_mask = gde_regs_[0x18] & (cg4 ? 0x03 : 0x0F);
-    // Register 18h is "I1 G1 R1 B1 I0 G0 R0 B0", one enable per displayed
-    // plane: the lower nibble is the first screen's four planes and the
-    // upper nibble the second screen's. 256-colour mode spends the second
-    // screen's planes on the extra bit per gun; 320x200 16-colour shows it
-    // as a second picture behind or in front of the first.
-    const uint8_t plane_mask2 = (uint8_t)((gde_regs_[0x18] >> 4) & 0x0F);
-    const uint32_t ring = sad1 + 1u;
-    // The controller sees one linear 32KB space per plane: 0000-3FFF in the
-    // standard VRAM (banks 20h-27h, two per plane) and 4000-7FFF in the
-    // expansion VRAM (28h-2Fh). 400-line modes reach into the second half.
-    // In 4-colour mode there is no expansion VRAM to reach, so the standard
-    // G and I banks stand in as the upper halves of the B and R planes.
-    // EmuZ-2500 reads the expansion banks here instead, which would leave a
-    // program written for an unexpanded machine with a blank lower half -
-    // and that machine is the only reason the mode exists.
-    const uint8_t* plane_bank[4][4];
-    for (int p = 0; p < 4; p++) {
-        const int hi = cg4 ? (0x24 + p * 2) : (0x28 + p * 2);
-        plane_bank[p][0] = mem_.bank_ptr(0x20 + p * 2);
-        plane_bank[p][1] = mem_.bank_ptr(0x21 + p * 2);
-        plane_bank[p][2] = mem_.bank_ptr(hi);
-        plane_bank[p][3] = mem_.bank_ptr(hi + 1);
-    }
+        int colour = 0;
+        if (mode == 1) {
+            // MZ-2000 has 640x200 B/R/G graphics. Its compatibility
+            // pages 1,2,3 occupy the native R/G/I plane storage; F6h
+            // bits 0,1,2 gate those pages as blue, red and green.
+            const uint16_t address = static_cast<uint16_t>(sy * 80 + (x >> 3));
+            const int bit = x & 7; // legacy graphics are LSB-leftmost
+            int graphic = 0;
+            if (state.compat_graphics_mask & 0x01)
+                graphic |= ((plane_byte(1, address) >> bit) & 1) << 0;
+            if (state.compat_graphics_mask & 0x02)
+                graphic |= ((plane_byte(2, address) >> bit) & 1) << 1;
+            if (state.compat_graphics_mask & 0x04)
+                graphic |= ((plane_byte(3, address) >> bit) & 1) << 2;
+            const int text_colour = state.compat_text_colour & 7;
+            const bool graphics_first = (state.compat_text_colour & 8) != 0;
+            colour = state.compat_background & 7;
+            if (graphics_first) {
+                if (text_on) colour = text_colour;
+                if (graphic) colour = graphic;
+            } else {
+                if (graphic) colour = graphic;
+                if (text_on) colour = text_colour;
+            }
+        } else {
+            // MZ-80B displays two 320x200 monochrome pages. D1/D2 of
+            // any F4h-F7h write enable page 1/page 2; text and graphics
+            // are ORed, then the result is doubled horizontally.
+            const int gx = x >> 1;
+            const uint16_t address = static_cast<uint16_t>(sy * 40 + (gx >> 3));
+            const int bit = gx & 7;
+            bool graphic = false;
+            if (state.compat_vram_control & 0x02)
+                graphic |= ((plane_byte(0, address) >> bit) & 1) != 0;
+            if (state.compat_vram_control & 0x04)
+                graphic |= ((plane_byte(1, address) >> bit) & 1) != 0;
+            bool mono = text_on || graphic;
+            if (reverse_mono) mono = !mono;
+            colour = mono ? 4 : 0; // original MZ-80B green phosphor
+        }
 
-    // --- text layer state ----------------------------------------------------
-    const bool text80 = (pio_a_ & 0x20) != 0;
+        uint8_t r = 0, g = 0, b = 0;
+        if (!force_blank) {
+            r = (colour & 2) ? 255 : 0;
+            g = (colour & 4) ? 255 : 0;
+            b = (colour & 1) ? 255 : 0;
+        }
+        uint8_t* pixel = row + x * 4;
+        pixel[0] = r;
+        pixel[1] = g;
+        pixel[2] = b;
+        pixel[3] = 0xFF;
+    }
+}
+
+void Mz2500::render(uint8_t* rgba) const {
+    static const uint8_t absent_bank[BankedMemory::BANK_SIZE] = {};
+    auto graphics_bank = [&](int bank) -> const uint8_t* {
+        return mem_.bank_present(bank) ? mem_.bank_ptr(bank) : absent_bank;
+    };
     const uint8_t* tvram = mem_.bank_ptr(0x38);
     const uint8_t* pcg = mem_.bank_ptr(0x39);
     // Text2 plane (tvram +1000h) K=1 routes a cell to the kanji ROM font:
@@ -175,109 +168,130 @@ void Mz2500::render(uint8_t* rgba) const {
     // scanline, 16 lines per cell, address bit3 ignored (I/O map, block 38h)
     const std::vector<uint8_t>& krom = mem_.kanji_rom();
     const uint32_t kmask = krom.empty() ? 0 : (uint32_t)krom.size() - 1;
-    // CRTC text roll: regs 01h/02h = display start address in cells, reg 09h
-    // = display start line (2-raster units). BASIC's console scrolls with a
-    // 7-step fine scroll and then advances the start address one row. The
-    // address counter is 11 bits and wraps at the end of the Text1 plane
-    // (2048 cells), not at the end of the 25 displayed rows - so a rolled
-    // screen runs through the 48 cells past row 24 before coming back to
-    // zero, which is exactly where BASIC writes its scrolled rows.
-    const int text_cols = (pio_a_ & 0x20) ? 80 : 40;
-    const int text_sa = ((crtc_regs_[2] << 8) | crtc_regs_[1]) & 0x7FF;
-    const int text_vd = (crtc_regs_[9] & 0x0F) * 2;
-    // Vertical text window: reg 03h = first displayed line, reg 05h = first
-    // blanked line, both in 2-raster units. BASIC-M25 sets 11h/D9h for its
-    // 25 rows and drops reg 05h to D1h while smooth-scrolling, which hides
-    // the row the fine scroll is feeding in. Outside the window the text
-    // layer is blank and the graphics layer shows through.
-    // Attribute bit7 blinks a cell at about 1Hz; bit1 of CRTC reg 00h turns
-    // the text layer's transparent parts into opaque black.
     const bool blink_phase = ((frames_ / 28) & 1) == 0;
-    // Port F6h gates the graphic layer's guns. In 16-colour mode the mask
-    // lands on the IGRB the palette produced - bit0 (BE) takes the I plane
-    // with the blue - and in 256-colour mode on the final output.
-    const bool gun_g = (cg_mask_ & 0x04) != 0;
-    const bool gun_r = (cg_mask_ & 0x02) != 0;
-    const bool gun_b = (cg_mask_ & 0x01) != 0;
-    const bool text_black_bg = (crtc_regs_[0x00] & 0x02) != 0;
-    // 40-column mode carries two text screens, the second at display address
-    // xor 400h. CRTC reg 00h bits 3-2 pick between them: 00 composes their
-    // colours into 64, 01 shows the first alone (and is what 80 columns
-    // uses), 10 the second alone, 11 lays one over the other in 8 colours.
-    // Reg 00h bit0 clear is the 64-colour text / 256-colour graphics pairing;
-    // with it set the text layer keeps its 8 colours through the CLUT.
     static const int PAGE_SELECT[4] = {3, 1, 2, 3}; // both, first, second, both
-    const int text_pages =
-        text80 ? 1 : PAGE_SELECT[(crtc_regs_[0x00] >> 2) & 3];
-    const bool text64 = (crtc_regs_[0x00] & 0x01) == 0;
-    // Vertical text window: reg 03h (SL) is the first displayed line and reg
-    // 05h (EL) the first blanked one, both counted in lines of the raw video
-    // timing - the same "from the start of the raw frame, not from the top of
-    // the picture" convention as the horizontal pair below. The I/O map's
-    // standard values for the 400-raster timing this renderer produces are
-    // 17 (11h) and 217 (D9h) (38h/FEh belong to the 200-raster timing), and
-    // one line of that timing is two rasters here, so a programmed SL moves
-    // the text layer's top edge down by (SL - 17) * 2 rasters and EL blanks
-    // it again at (EL - 17) * 2. Anchoring the window at SL is what lets a
-    // title park a text panel partway down the screen; EL at SL closes the
-    // window completely, which is how the same title keeps its message
-    // hidden while it fills the text planes. See win_kind() in core/gcrtc.h
-    // for the three cases and for what an unwritten pair means - the VRAM
-    // wait model reads the same window off the same registers.
-    const WinKind vwin = text_vwin_kind();
-    const int text_y0 = (crtc_regs_[3] - TEXT_WIN_LINE0) * 2;
-    const int text_y1 = (crtc_regs_[5] - TEXT_WIN_LINE0) * 2;
-    // Horizontal text window: reg 07h (SC) is the first displayed digit and
-    // reg 08h (EC) the first blanked one, both counted in 8-dot digits of
-    // the raw video timing rather than from the left edge of the picture.
-    // The I/O map's standard values are the ones that put text column 0 at
-    // the left edge of the active area - 9 at 80 digits and 8 at 40, for the
-    // 400-raster timing this renderer produces (11 and 10 belong to the
-    // 200-raster timing, which never reaches the framebuffer here) - so a
-    // programmed SC displaces the text layer's left edge by (SC - standard)
-    // digits and EC blanks it again (EC - standard) digits in. A title that
-    // narrows the window this way is reserving the digits it gives up for
-    // the graphics layer, which keeps its own window in GDEHS/GDEHE.
-    const int text_digit0 = text80 ? 9 : 8;
-    const WinKind hwin =
-        win_kind(crtc_hwin_written_, crtc_regs_[7], crtc_regs_[8]);
-    const int text_x0 = (crtc_regs_[7] - text_digit0) * 8;
-    const int text_x1 = (crtc_regs_[8] - text_digit0) * 8;
-    // Background colour (CRTC regs 0Bh/0Ch): in 16-colour mode one bit per
-    // component - I from 0Bh bit0, B from 0Bh bit2, R from 0Bh bit5, G from
-    // 0Ch bit0. A graphic pixel whose palette entry is 0 shows this instead.
-    const int bg_colour = ((crtc_regs_[0x0B] & 0x01) << 3) |
-                          ((crtc_regs_[0x0C] & 0x01) << 2) |
-                          (((crtc_regs_[0x0B] >> 5) & 1) << 1) |
-                          ((crtc_regs_[0x0B] >> 2) & 1);
-    // The same two registers carry a full 9-bit colour for 256-colour mode:
-    // 0Bh is G1 G0 R2 R1 R0 B2 B1 B0 and 0Ch bit0 is G2.
-    const int bg_rgb = (((crtc_regs_[0x0B] >> 3) & 0x07) << 6) |
-                       ((((crtc_regs_[0x0C] & 1) << 2) |
-                         ((crtc_regs_[0x0B] >> 6) & 0x03)) << 3) |
-                       (crtc_regs_[0x0B] & 0x07);
-
     for (int y = 0; y < 400; y++) {
+        const RasterLineState& state = raster_line_[y];
+        const uint8_t* crtc = state.crtc;
+        const uint8_t* gde = state.gde;
+        uint8_t* row = rgba + (size_t)y * 640 * 4;
+
+        const int line_mode = crtc[0x0F] & 3;
+        if (line_mode == 1 || line_mode == 2) {
+            render_compat_line(row, y, line_mode);
+            continue;
+        }
+
+        // VGATE is a raster signal too. A write during the picture blanks
+        // only the lines that have not yet been scanned.
+        if ((state.ppi_control & 0x01) == 0 && (state.ppi_c & 0x01)) {
+            for (int x = 0; x < 640; x++) {
+                row[x * 4 + 0] = 0;
+                row[x * 4 + 1] = 0;
+                row[x * 4 + 2] = 0;
+                row[x * 4 + 3] = 255;
+            }
+            continue;
+        }
+
+        // Resolve the palette from the values that existed on this raster.
+        const bool rgb444 = mz1m10_present_ && state.palette_written &&
+                            state.opn_port_a_output &&
+                            (state.opn_port_a & 0x04) == 0;
+        uint8_t pal_r[16], pal_g[16], pal_b[16];
+        for (int i = 0; i < 16; i++) {
+            if (rgb444 && i != 0) {
+                const uint8_t even = state.palette[i * 2];
+                const uint8_t odd = state.palette[i * 2 + 1];
+                pal_r[i] = static_cast<uint8_t>(((even >> 4) & 0x0F) << 4);
+                pal_g[i] = static_cast<uint8_t>((odd & 0x0F) << 4);
+                pal_b[i] = static_cast<uint8_t>((even & 0x0F) << 4);
+            } else if (rgb444) {
+                pal_r[i] = pal_g[i] = pal_b[i] = 0;
+            } else if (i == 8) {
+                pal_r[i] = pal_g[i] = pal_b[i] = 95;
+            } else {
+                const int hi = (i & 0x08) ? 255 : 127;
+                pal_g[i] = (i & 0x04) ? hi : 0;
+                pal_r[i] = (i & 0x02) ? hi : 0;
+                pal_b[i] = (i & 0x01) ? hi : 0;
+            }
+        }
+
+        const uint8_t gmode = gde[0x0E];
+        const bool h640 = (gmode & 0x02) != 0;
+        const bool v200 = gde_v200(gmode);
+        const bool cg4 = !(gmode & 0x10) && !v200 && h640;
+        const bool cg256 = (gmode & 0x18) == 0x18 && v200 && !h640;
+        const bool cg2page = !h640 && v200 && !cg256 && (gmode & 0x10) != 0;
+        const bool page0_front = (gmode & 0x01) != 0;
+        const bool cg_on = gde_cg_on(gmode);
+        const uint16_t gdevs = reg16(gde, 0x08);
+        const uint16_t gdeve = reg16(gde, 0x0A);
+        const int win_unit = h640 ? 8 : 4;
+        const int cg_stride = h640 ? 80 : 40;
+        const int hdsc = gde[0x0F] & 7;
+        const uint16_t sad0 = reg16(gde, 0x10);
+        const uint16_t sad1 = reg16(gde, 0x12);
+        const uint16_t sad2 = reg16(gde, 0x14);
+        const uint16_t sln1 = reg16(gde, 0x16);
+        const uint8_t plane_mask = gde[0x18] & (cg4 ? 0x03 : 0x0F);
+        const uint8_t plane_mask2 = (uint8_t)((gde[0x18] >> 4) & 0x0F);
+        const uint32_t ring = sad1 + 1u;
+        const uint8_t* plane_bank[4][4];
+        for (int p = 0; p < 4; p++)
+            for (int q = 0; q < 4; q++)
+                plane_bank[p][q] = graphics_bank(
+                    gde_plane_bank(p, (uint32_t)q << 13, gmode));
+
+        const bool text80 = (state.pio_a & 0x20) != 0;
+        const int text_cols = text80 ? 80 : 40;
+        const int text_sa = ((crtc[2] << 8) | crtc[1]) & 0x7FF;
+        const int text_vd = (crtc[9] & 0x0F) * 2;
+        const bool gun_g = (state.cg_mask & 0x04) != 0;
+        const bool gun_r = (state.cg_mask & 0x02) != 0;
+        const bool gun_b = (state.cg_mask & 0x01) != 0;
+        const bool text_black_bg = (crtc[0x00] & 0x02) != 0;
+        const int text_pages = text80 ? 1 : PAGE_SELECT[(crtc[0x00] >> 2) & 3];
+        const bool text64 = (crtc[0x00] & 0x01) == 0;
+        const WinKind vwin = win_kind(state.crtc_vwin_written,
+                                      crtc[3], crtc[5]);
+        const int text_y0 = (crtc[3] - TEXT_WIN_LINE0) * 2;
+        const int text_y1 = (crtc[5] - TEXT_WIN_LINE0) * 2;
+        const int text_digit0 = text80 ? 9 : 8;
+        const WinKind hwin = win_kind(state.crtc_hwin_written,
+                                      crtc[7], crtc[8]);
+        const int text_x0 = (crtc[7] - text_digit0) * 8;
+        const int text_x1 = (crtc[8] - text_digit0) * 8;
+        const int bg_colour = ((crtc[0x0B] & 0x01) << 3) |
+                              ((crtc[0x0C] & 0x01) << 2) |
+                              (((crtc[0x0B] >> 5) & 1) << 1) |
+                              ((crtc[0x0B] >> 2) & 1);
+        const int bg_rgb = (((crtc[0x0B] >> 3) & 0x07) << 6) |
+                           ((((crtc[0x0C] & 1) << 2) |
+                             ((crtc[0x0B] >> 6) & 0x03)) << 3) |
+                           (crtc[0x0B] & 0x07);
+
         // GDEVS/GDEVE/SLN1 count display lines, so a 400-line mode addresses
         // every raster and a 200-line mode doubles each one.
         const int gy = v200 ? (y >> 1) : y;
-        uint8_t* row = rgba + (size_t)y * 640 * 4;
 
         // GDEHS/GDEHE as they stood while this raster was scanned. The
         // 24 kHz frame displays VBLANK_START_LINE = 400 of its 448 lines and
         // this framebuffer is 400 rasters, so the two are the same raster:
-        // one entry of hwin_line_ per row, which is the only ratio at which
+        // one RasterLineState entry per row, which is the only ratio at which
         // a program that rewrites the window every raster keeps its shape.
         static_assert(VBLANK_START_LINE == 400,
                       "the framebuffer is one raster per displayed line");
-        const int win_x0 = hwin_line_[y][0] * win_unit;
-        const int win_x1 = hwin_line_[y][1] * win_unit;
+        const int win_x0 = gde[0x0C] * win_unit;
+        const int win_x1 = gde[0x0D] * win_unit;
 
         // CG source row
         const uint8_t* cg_valid = nullptr;
         uint32_t cg_base = 0;
         if (cg_on && gy >= gdevs && gy < gdeve) {
-            cg_base = ((gy < sln1 ? sad0 : sad2) + (uint32_t)cg_stride * gy) % ring;
+            cg_base = gde_row_address((uint32_t)gy, (uint32_t)cg_stride,
+                                      sad0, sad1, sad2, sln1);
             cg_valid = reinterpret_cast<const uint8_t*>(1); // marker
         }
 
@@ -287,12 +301,12 @@ void Mz2500::render(uint8_t* rgba) const {
         // how BASIC-M25 lays out its logo and text (even codes only). In
         // 8-line mode a cell carries 8 glyph lines, double-scanned, and A[3]
         // selects the half - the layout NEKO CAN RUN's PCG art uses.
-        const bool text16 = (font_size_ & 1) == 0;
+        const bool text16 = (state.font_size & 1) == 0;
         const int ty = y + text_vd; // text raster after the fine roll
         // CRTC reg 00h bit4 selects 20 rows instead of 25: the cell grows to
         // 20 rasters, the extra 4 below the glyph carrying the attribute but
         // no pixels.
-        const bool rows20 = (crtc_regs_[0x00] & 0x10) != 0;
+        const bool rows20 = (crtc[0x00] & 0x10) != 0;
         const int cell_h = rows20 ? 20 : 16;
         const int trow = (ty / cell_h) % (rows20 ? 20 : 25);
         const int cell_line = ty % cell_h;
@@ -441,7 +455,7 @@ void Mz2500::render(uint8_t* rgba) const {
                         }
                         // CRTC regs 80h-8Fh are the graphic palette: bit4 =
                         // this colour draws in front of the text layer.
-                        const bool wins = !text_on || (crtc_regs_[0x80 + c] & 0x10);
+                        const bool wins = !text_on || (crtc[0x80 + c] & 0x10);
                         if (cg256) {
                             // The second page rides at display address xor
                             // 2000h and takes no palette; together the two
@@ -454,11 +468,11 @@ void Mz2500::render(uint8_t* rgba) const {
                                     plane_bank[p][(a1 >> 13) & 3][a1 & 0x1FFF];
                                 c1 |= ((byte >> bit) & 1) << p;
                             }
-                            const int pal0 = crtc_regs_[0x80 + c] & 0x0F;
+                            const int pal0 = crtc[0x80 + c] & 0x0F;
                             if (wins) {
                                 rgb = (pal0 == 0 && c1 == 0)
                                           ? bg_rgb
-                                          : compose256(pal0, c1, crtc_regs_[0x0A]);
+                                          : compose256(pal0, c1, crtc[0x0A]);
                                 // Port F6h gates the final 256-colour output.
                                 if (!gun_r) rgb &= ~0x1C0;
                                 if (!gun_g) rgb &= ~0x038;
@@ -468,7 +482,7 @@ void Mz2500::render(uint8_t* rgba) const {
                             // A graphic pixel that lands on palette code 0
                             // shows the background colour, not plain black.
                             const int mapped =
-                                (crtc_regs_[0x80 + c] & 0x0F) ? c : bg_colour;
+                                (crtc[0x80 + c] & 0x0F) ? c : bg_colour;
                             if (wins) { color = mapped; from_graphics = true; }
                         }
                     }
@@ -491,7 +505,7 @@ void Mz2500::render(uint8_t* rgba) const {
             // hardware displays, so it goes to the RGB lookup as-is;
             // only a graphics-sourced pixel (from_graphics) still needs
             // the 80h-8Fh translation.
-            int n = from_graphics ? (crtc_regs_[0x80 + color] & 0x0F) : color;
+            int n = from_graphics ? (crtc[0x80 + color] & 0x0F) : color;
             if (from_graphics) {
                 // Port F6h gates the graphic layer's guns. Only BE gets a
                 // pre-lookup clear of the CLUT index: BE is the sole bit

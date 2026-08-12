@@ -11,13 +11,17 @@ endif()
 
 add_library(mz2500_core STATIC
   core/banked_memory.cpp
+  core/cmt.cpp
   core/d88.cpp
   core/dummy_ipl.cpp
   core/fdc_mb8877.cpp
   core/mz2500.cpp
   core/opn.cpp
   core/adpcm.cpp
+  core/printer.cpp
   core/renderer.cpp
+  core/sasi.cpp
+  core/z80_sio.cpp
   vendor/z80/z80.c
   vendor/ymfm/ymfm_opn.cpp
   vendor/ymfm/ymfm_ssg.cpp
@@ -65,6 +69,8 @@ else()
   add_executable(test_disk_io tests/unit/test_disk_io.cpp)
   target_link_libraries(test_disk_io PRIVATE mz2500_core)
   add_test(NAME disk_io COMMAND test_disk_io)
+  set_tests_properties(disk_io PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
   add_executable(test_keyboard tests/unit/test_keyboard.cpp)
   target_link_libraries(test_keyboard PRIVATE mz2500_core)
@@ -97,6 +103,38 @@ else()
   add_executable(test_adpcm tests/unit/test_adpcm.cpp)
   target_link_libraries(test_adpcm PRIVATE mz2500_core)
   add_test(NAME adpcm COMMAND test_adpcm)
+
+  add_executable(test_opn tests/unit/test_opn.cpp)
+  target_link_libraries(test_opn PRIVATE mz2500_core)
+  add_test(NAME opn COMMAND test_opn)
+
+  add_executable(test_gcrtc tests/unit/test_gcrtc.cpp)
+  target_link_libraries(test_gcrtc PRIVATE mz2500_core)
+  add_test(NAME gcrtc COMMAND test_gcrtc)
+
+  add_executable(test_z80_sio tests/unit/test_z80_sio.cpp)
+  target_link_libraries(test_z80_sio PRIVATE mz2500_core)
+  add_test(NAME z80_sio COMMAND test_z80_sio)
+
+  add_executable(test_sio_wiring tests/unit/test_sio_wiring.cpp)
+  target_link_libraries(test_sio_wiring PRIVATE mz2500_core)
+  add_test(NAME sio_wiring COMMAND test_sio_wiring)
+
+  add_executable(test_cmt tests/unit/test_cmt.cpp)
+  target_link_libraries(test_cmt PRIVATE mz2500_core)
+  add_test(NAME cmt COMMAND test_cmt)
+
+  add_executable(test_printer tests/unit/test_printer.cpp)
+  target_link_libraries(test_printer PRIVATE mz2500_core)
+  add_test(NAME printer COMMAND test_printer)
+
+  add_executable(test_sasi tests/unit/test_sasi.cpp)
+  target_link_libraries(test_sasi PRIVATE mz2500_core)
+  add_test(NAME sasi COMMAND test_sasi)
+
+  add_executable(test_compat tests/unit/test_compat.cpp)
+  target_link_libraries(test_compat PRIVATE mz2500_core)
+  add_test(NAME compat COMMAND test_compat)
 
   endif()
 endif()

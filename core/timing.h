@@ -37,6 +37,34 @@ constexpr double FRAMES_PER_SEC =
 // 400 of the 448 lines carry picture; the last 48 are vertical blanking.
 constexpr int VBLANK_START_LINE = 400;
 
+// The 15 kHz / 200-line monitor timing used by MZ-2000 and MZ-80B
+// compatibility mode. The hardware runs 262 lines at 60.99 Hz. Device time
+// in this core stays on the MZ-2500's 6 MHz master axis even while the Z80 is
+// divided to 4 MHz, hence round(6 MHz / 60.99) ticks per frame.
+constexpr int CYCLES_PER_FRAME_15KHZ = 98'377;
+constexpr int LINES_PER_FRAME_15KHZ = 262;
+constexpr int VBLANK_START_LINE_15KHZ = 200;
+constexpr int HBLANK_CYCLES_15KHZ = 110;
+
+constexpr int line_start_cycle_for(int line, int cycles, int lines) {
+    return static_cast<int>(((int64_t)line * cycles + lines - 1) / lines);
+}
+
+constexpr int line_of_cycle_for(int in_frame, int cycles, int lines) {
+    return static_cast<int>((int64_t)in_frame * lines / cycles);
+}
+
+// Position on the machine's current video timebase. run_frame() advances
+// frame_origin only after the last Z80 instruction completes, so that
+// instruction can already be a few cycles into the following frame.
+constexpr int cycle_in_frame(uint64_t cycle, uint64_t frame_origin,
+                             int cycles_per_frame) {
+    return cycle < frame_origin || cycles_per_frame <= 0
+        ? 0
+        : static_cast<int>((cycle - frame_origin) %
+                           static_cast<uint64_t>(cycles_per_frame));
+}
+
 // Horizontal blanking, at the end of every line. The article above measured
 // it directly at 6 MHz - 70 states against 170 of scanning - and that is a
 // measurement of the window the CPU gets, which is exactly what the VRAM
@@ -51,13 +79,12 @@ constexpr int HBLANK_CYCLES = 70;
 // makes line_of_cycle() its exact inverse, and makes
 // line_start_cycle(LINES_PER_FRAME) land on CYCLES_PER_FRAME.
 constexpr int line_start_cycle(int line) {
-    return static_cast<int>(((int64_t)line * CYCLES_PER_FRAME + LINES_PER_FRAME - 1) /
-                            LINES_PER_FRAME);
+    return line_start_cycle_for(line, CYCLES_PER_FRAME, LINES_PER_FRAME);
 }
 
 // Which line a cycle offset within the frame belongs to.
 constexpr int line_of_cycle(int in_frame) {
-    return static_cast<int>((int64_t)in_frame * LINES_PER_FRAME / CYCLES_PER_FRAME);
+    return line_of_cycle_for(in_frame, CYCLES_PER_FRAME, LINES_PER_FRAME);
 }
 
 // 8253 PIT input clock divider: 6 MHz / 192 = 31.25 kHz.

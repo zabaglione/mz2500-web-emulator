@@ -19,15 +19,74 @@
   <h1>MZ-2500 <span class="sub">WEB EMULATOR</span> <span class="build">BUILD __BUILD__</span></h1>
   <div id="layout">
   <aside id="left-pane">
+  <details id="help-config" class="help-menu">
+    <summary>ヘルプ</summary>
+    <details class="help-topic">
+      <summary>デモゲームの遊び方</summary>
+      <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ<br>
+        ゲームパッド: A / × = トリガ1 ・ B / ○ = トリガ2 ・ 十字キーまたは左スティック = 移動
+        （割り当ては「ゲームパッドのボタン割り当て」で変更できます）</p>
+      <p class="fine">NEKO CAN RUN の初期設定はトリガ2 = ジャンプ、トリガ1 = ダッシュです。
+        タイトル画面の CONFIG で入れ替えられます。</p>
+      <p>同梱の <strong>NEKO CAN RUN デモ版</strong>（WORLD 1）は動作検証を兼ねたサンプルです。
+        デモ版・製品版（有償・全4ワールド）は
+        <a href="https://zabaglione.booth.pm/items/8672891" target="_blank" rel="noopener">BOOTH（ザバイオーネ研究室）</a>
+        にて配布中。</p>
+    </details>
+    <details class="help-topic">
+      <summary>使い方</summary>
+      <p>画面下の KEYBOARD で<strong>画面上のキーボード</strong>を開閉できます。
+        SHIFT・CTRL・GRAPH・カナ・LOCK は押すと固定され、もう一度押すと戻ります。
+        そのほかのキーは押している間だけ入力され、実キーボードとも同時に使えます。</p>
+      <p>画面へ D88 をドロップすると FD1 に入れて起動します。
+        FDDベイへのドロップや交換アイコンでは、リセットせずディスクを交換できます。
+        複数ボリューム入り D88 は自動分割され、ドライブ内の選択欄で切り替えられます。
+        ディスクはこのブラウザ内に保存され、外部には送信されません。</p>
+      <p class="fine">各操作の短い説明は、ボタンへマウスを重ねるか、キーボードでフォーカスすると表示されます。</p>
+    </details>
+  </details>
   <details id="hw-config">
     <summary>ハードウェア構成（拡張ボード）</summary>
-    <p class="fine">実機のオプションボード相当。変更は保存され、RAM/GRAMはRESET後に反映されます。
+    <p class="fine">実機のオプションボード相当。変更は保存され、RAM/GRAMはIPL後に反映されます。
       同梱デモは既定構成（すべてON）を前提としています。</p>
     <label class="fine"><input type="checkbox" id="hw-expram" checked> 拡張RAM（128KB→256KB、バンク10h-1Fh）</label><br>
     <label class="fine"><input type="checkbox" id="hw-expgram" checked> 増設ビデオRAM MZ-1R27（GRAM 64KB→128KB、バンク28h-2Fh。640×400 16色に必要）</label><br>
     <label class="fine"><input type="checkbox" id="hw-mz1m10" checked> MZ-1M10（4096色パレットボード、ポートAEh）</label><br>
     <label class="fine"><input type="checkbox" id="hw-adpcm" checked> MZ-1E35（ADPCMボード Y8950、ポート98h/99h）</label><br>
-    <label class="fine"><input type="checkbox" id="hw-emm" checked> MZ-1R37（640KB EMM、ポートACh/ADh）</label>
+    <label class="fine"><input type="checkbox" id="hw-emm" checked> MZ-1R37 (640 KB EMM, ports ACh/ADh)</label><br>
+    <label class="fine"><input type="checkbox" id="hw-sasi" checked> MZ-1E30 (SASI I/F, ports A4h/A5h and A8h/A9h)</label>
+  </details>
+  <details id="adpcm-config">
+    <summary>MZ-1E35 (Y8950)</summary>
+    <p class="fine">The original board RAM population and the four GPIO function bits are
+      not documented. RAM size is selectable; 32 KB remains the compatibility default.
+      GPIO is exposed as raw Y8950 pins without inventing a LINE/MIC bit assignment.</p>
+    <label class="fine">External RAM
+      <select id="adpcm-ram">
+        <option value="8192">8 KB</option>
+        <option value="16384">16 KB</option>
+        <option value="32768" selected>32 KB (provisional)</option>
+        <option value="65536">64 KB</option>
+        <option value="131072">128 KB</option>
+        <option value="262144">256 KB</option>
+      </select>
+    </label>
+    <label class="fine">Mix calibration
+      <input id="adpcm-gain" type="range" min="0" max="200" step="1" value="100">
+      <span id="adpcm-gain-value">1.00</span>x
+    </label>
+    <div class="adpcm-row">
+      <button id="adpcm-input" class="insbtn" type="button" aria-pressed="false">Start audio input</button>
+      <span id="adpcm-input-state">Input stopped</span>
+    </div>
+    <fieldset id="adpcm-gpio">
+      <legend>GPIO input levels</legend>
+      <label><input type="checkbox" data-gpio="0" checked>IO0</label>
+      <label><input type="checkbox" data-gpio="1" checked>IO1</label>
+      <label><input type="checkbox" data-gpio="2" checked>IO2</label>
+      <label><input type="checkbox" data-gpio="3" checked>IO3</label>
+    </fieldset>
+    <output id="adpcm-state">POWER OFF</output>
   </details>
   <details id="key-config">
     <summary>キーボード</summary>
@@ -52,6 +111,85 @@
       <input type="range" id="mouse-sens" min="1" max="40" step="1" value="10">
       <span id="mouse-sens-val">1.0</span>倍</label>
   </details>
+  <details id="sio-config">
+    <summary>RS-232C (Z80 SIO)</summary>
+    <p class="fine">Virtual terminal, timed loopback, or a physical adapter through
+      Web Serial. Channel B is unavailable while the MZ-1X10 mouse switch is active.</p>
+    <div class="sio-row">
+      <label>Channel <select id="sio-channel">
+        <option value="0">A (9-pin)</option>
+        <option value="1">B (25-pin / mouse)</option>
+      </select></label>
+      <label>Mode <select id="sio-transport">
+        <option value="terminal">Terminal</option>
+        <option value="loopback">Loopback</option>
+        <option value="webserial">Web Serial</option>
+      </select></label>
+    </div>
+    <div class="sio-row">
+      <button id="sio-connect" class="insbtn" type="button">Connect</button>
+      <span id="sio-connection">Virtual line ready</span>
+    </div>
+    <output id="sio-line">POWER OFF</output>
+    <button id="sio-io-toggle" class="io-toggle insbtn" type="button"
+      aria-controls="sio-io-panel" aria-expanded="false">OPEN I/O</button>
+  </details>
+  <details id="cmt-config">
+    <summary>CMT data recorder</summary>
+    <p class="fine">画面下のボイスレコーダでWAVテープを操作します。カセット窓の下にある
+      アイコンは、左からWAV読込、再挿入、5分のブランク作成、ライトプロテクト、WAV保存です。</p>
+    <p class="fine">データトラックのパルス幅を保ったまま読み書きします。MIC・EARとRECキーは
+      実機のアナログ音声トラック用で、現在は外観と状態表示のみです。</p>
+  </details>
+  <details id="sasi-config">
+    <summary>SASI hard disk (MZ-1E30)</summary>
+    <p class="fine">Mount a raw HDF image. The target implements SASI bus phases,
+      automatic A4h ACK handshakes, six-byte commands, read/write/format, sense,
+      and the optional A8h/A9h BIOS ROM window. Images stay in this browser.</p>
+    <output id="sasi-state">POWER OFF</output>
+    <div class="sasi-row">
+      <label>Block <select id="sasi-block">
+        <option value="0" selected>Auto</option>
+        <option value="256">256 B</option>
+        <option value="512">512 B</option>
+        <option value="1024">1024 B</option>
+      </select></label>
+      <label>Target ID <select id="sasi-target">
+        <option value="0" selected>0</option><option value="1">1</option>
+        <option value="2">2</option><option value="3">3</option>
+        <option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option>
+      </select></label>
+    </div>
+    <div class="sasi-row">
+      <button id="sasi-load" class="insbtn" type="button">Load HDF</button>
+      <button id="sasi-insert" class="insbtn" type="button">Insert</button>
+      <label>New <select id="sasi-new-size">
+        <option value="10441728:256">10 MB / 256 B</option>
+        <option value="22437888:1024">MZ-1F23 / 1024 B</option>
+        <option value="41496576:256">40 MB / 256 B</option>
+      </select></label>
+      <button id="sasi-new" class="insbtn" type="button">Create</button>
+    </div>
+    <div class="sasi-row">
+      <button id="sasi-wp" class="insbtn" type="button" aria-pressed="false">WP</button>
+      <button id="sasi-save" class="insbtn" type="button">Save HDF</button>
+      <button id="sasi-eject" class="insbtn" type="button">Eject</button>
+    </div>
+    <input type="file" id="sasi-file" accept=".hdf,.hds,.hdi,.nhd,.img,.bin"
+      class="offscreen">
+  </details>
+  <details id="printer-config">
+    <summary>Parallel printer (FEh/FFh)</summary>
+    <p class="fine">Centronics-compatible raw capture. STB, PRIM, STA/ACK,
+      BUSY, and the printer interrupt are timed by the machine core. Save the
+      byte stream as a .prn file; no character set or printer commands are assumed.</p>
+    <label class="fine"><input id="printer-online" type="checkbox" checked>
+      Online</label>
+    <output id="printer-state">POWER OFF</output>
+    <button id="printer-io-toggle" class="io-toggle insbtn" type="button"
+      aria-controls="printer-io-panel" aria-expanded="false">OPEN OUTPUT</button>
+  </details>
   <details id="pad-config">
     <summary>ゲームパッドのボタン割り当て</summary>
     <p class="fine">実機のジョイスティックは2ボタン（トリガ1・トリガ2）です。どのパッドボタンを
@@ -67,6 +205,10 @@
     <p class="fine">実機からご自身で吸い出した ROM を登録できます。ファイルは<strong>このブラウザ内にのみ保存</strong>され、
       どこにも送信されません。ROM が無くても同梱ゲームは完全動作します。</p>
     <div id="rom-slots"></div>
+    <p class="fine">Compatibility mode models the rear-panel selector. It uses the
+      MZ-2500 ipl.rom and kanji.rom; separate MZ-2000/MZ-80B IPL or CG ROM files
+      are not used. This matches black-box EmuZ-2500 output. Change MODE, then
+      press IPL.</p>
     <label class="fine"><input type="checkbox" id="real-ipl-mode">
       実IPLで起動する（ipl.rom 登録時のみ。BASIC-M25 などの市販ディスクを起動できます。
       文字表示には kanji.rom も登録してください）</label>
@@ -80,41 +222,202 @@
       <p class="hint">NEKO CAN RUN デモ版（WORLD 1）を起動します（音が出ます）</p>
     </div>
   </div>
-  <div id="drivebay">
-    <span class="drive">
-      <span class="lamp" id="lamp0">&#9679;</span><span class="dlabel">FD1</span>
-      <span class="dname" id="dname0">-</span>
-      <select id="vol0" class="volsel" hidden></select>
-      <button class="insbtn" id="ins0" title="ディスク入替（リセットしません）">入替</button>
-      <button class="insbtn" id="eject0" title="このブラウザに保存したディスクを消去（次回起動はデモに戻ります）">&#9167;</button>
-      <button class="insbtn" id="blank0" title="未フォーマットのブランクディスクを入れる">新規</button>
-      <button class="insbtn" id="save0" title="いま入っているディスクを.d88で保存">保存</button>
-      <button class="insbtn" id="wp0" type="button" aria-pressed="false"
-        title="ライトプロテクト（実機のタブ相当）">WP</button>
-    </span>
-    <span class="drive">
-      <span class="lamp" id="lamp1">&#9679;</span><span class="dlabel">FD2</span>
-      <span class="dname" id="dname1">(empty)</span>
-      <select id="vol1" class="volsel" hidden></select>
-      <button class="insbtn" id="ins1" title="ディスク入替（リセットしません）">入替</button>
-      <button class="insbtn" id="eject1" title="このブラウザに保存したディスクを消去">&#9167;</button>
-      <button class="insbtn" id="blank1" title="未フォーマットのブランクディスクを入れる">新規</button>
-      <button class="insbtn" id="save1" title="いま入っているディスクを.d88で保存">保存</button>
-      <button class="insbtn" id="wp1" type="button" aria-pressed="false"
-        title="ライトプロテクト（実機のタブ相当）">WP</button>
-    </span>
-    <button id="tenkey-btn" class="insbtn" type="button" aria-pressed="false"
-      title="カーソルキーをテンキーとして送る（設定は左の「キーボード」）">テンキー</button>
-    <button id="mouse-btn" class="insbtn" type="button" aria-pressed="false"
-      title="マウス捕捉の入切（画面クリックでも捕捉します）">マウス</button>
-    <button id="vkbd-btn" class="insbtn" type="button" aria-pressed="false"
-      title="画面上のキーボードを開閉（GRAPH・カナ・変換・HELP・COPYなど実機だけのキーを押せます）">キーボード</button>
-    <button id="reset-btn" title="FD1のディスクから再起動">RESET</button>
+  <section id="drivebay" aria-label="Front panel">
+    <section id="cmt-deck" aria-label="CMT voice recorder">
+      <div class="cmt-utility-strip">
+        <div class="cmt-power" data-tooltip="本体電源ランプ。電源ONで点灯します">
+          <span>POWER</span><span id="cmt-power-lamp" class="cmt-power-lamp" aria-hidden="true"></span>
+        </div>
+        <div class="cmt-microphone-grille" data-tooltip="内蔵マイク（アナログ音声トラックは未実装）"
+          aria-label="Built-in microphone"><span aria-hidden="true"></span></div>
+        <button id="cmt-mic-toggle" class="cmt-mic-switch" type="button" aria-pressed="false"
+          aria-disabled="true" data-tooltip="内蔵・外部マイク切替。アナログ音声トラックは未実装です">
+          <span>MIC</span><span class="cmt-switch-legend">ON<br>OFF</span><span class="cmt-switch-knob" aria-hidden="true"></span>
+        </button>
+        <div class="cmt-jack" data-tooltip="外部マイク入力端子（アナログ音声トラックは未実装）">
+          <span>MIC</span><i aria-hidden="true"></i>
+        </div>
+        <div class="cmt-jack" data-tooltip="イヤホン出力端子（ブラウザの音声出力にはVOLUMEを使用）">
+          <span>EAR</span><i aria-hidden="true"></i>
+        </div>
+      </div>
+
+      <div class="cmt-cassette-bay">
+        <div id="cmt-cassette" class="cmt-cassette-window" role="img"
+          aria-label="Cassette tape window" data-tooltip="CMTテープ。WAVは下のフォルダアイコンから読み込みます">
+          <div class="cmt-cassette-shell" aria-hidden="true">
+            <span class="cmt-reel cmt-reel-left"></span>
+            <span class="cmt-tape-path"></span>
+            <span class="cmt-reel cmt-reel-right"></span>
+            <span class="cmt-cassette-label">CMT / DATA</span>
+          </div>
+          <span id="cmt-media-name" class="cmt-media-name">NO TAPE</span>
+          <progress id="cmt-progress" max="1" value="0" aria-label="Tape position"></progress>
+        </div>
+        <output id="cmt-state">POWER OFF</output>
+        <div class="cmt-media-actions" aria-label="CMT media actions">
+          <button id="cmt-load" class="cmt-media-button" type="button" aria-label="Load WAV"
+            data-tooltip="WAVテープを読み込む">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z"/><path d="M8 14h8"/></svg>
+          </button>
+          <button id="cmt-insert" class="cmt-media-button" type="button" aria-label="Insert tape"
+            data-tooltip="取り出したテープを再挿入">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/></svg>
+          </button>
+          <button id="cmt-new" class="cmt-media-button" type="button" aria-label="Create blank tape"
+            data-tooltip="5分のブランクテープを作成">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="12"/><path d="M12 9v6m-3-3h6"/></svg>
+          </button>
+          <button id="cmt-wp" class="cmt-media-button" type="button" aria-label="Write protect"
+            aria-pressed="false" data-tooltip="ライトプロテクト">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="10" width="12" height="10"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>
+          </button>
+          <button id="cmt-save" class="cmt-media-button" type="button" aria-label="Save WAV"
+            data-tooltip="現在のテープをWAV保存">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10m0 0-4-4m4 4 4-4"/><path d="M5 16v4h14v-4"/></svg>
+          </button>
+        </div>
+        <input type="file" id="cmt-file" accept=".wav,audio/wav" class="offscreen">
+      </div>
+
+      <div class="cmt-transport-panel">
+        <div class="cmt-counter-block" data-tooltip="テープ位置を000–999に換算する簡易カウンター。リール径による非線形変化は未再現です">
+          <span>COUNTER</span>
+          <output id="cmt-counter" class="cmt-counter">000</output>
+          <button id="cmt-counter-reset" class="cmt-counter-reset" type="button"
+            aria-label="Reset tape counter" data-tooltip="カウンターを000に戻す"></button>
+        </div>
+        <div class="cmt-transport-row cmt-eject-row">
+          <span class="cmt-transport-label">EJECT <small>UP</small></span>
+          <button id="cmt-eject" class="cmt-transport-key" type="button" data-tooltip="カセットを取り出す"></button>
+        </div>
+        <div class="cmt-transport-row no-led">
+          <span class="cmt-transport-label">STOP <small>[]</small></span>
+          <button class="cmt-transport-key cmt-command" data-command="0" type="button" data-tooltip="テープ走行を停止"></button>
+        </div>
+        <div class="cmt-transport-row">
+          <span class="cmt-transport-label">PLAY <small>&gt;</small></span>
+          <span id="cmt-led-play" class="cmt-transport-led green" aria-hidden="true"></span>
+          <button class="cmt-transport-key cmt-command" data-command="1" type="button" data-tooltip="テープを再生"></button>
+        </div>
+        <div class="cmt-transport-row">
+          <span class="cmt-transport-label">FF <small>&gt;&gt;</small></span>
+          <span id="cmt-led-ff" class="cmt-transport-led green" aria-hidden="true"></span>
+          <button class="cmt-transport-key cmt-command" data-command="2" type="button" data-tooltip="テープを早送り"></button>
+        </div>
+        <div class="cmt-transport-row">
+          <span class="cmt-transport-label">REW <small>&lt;&lt;</small></span>
+          <span id="cmt-led-rew" class="cmt-transport-led green" aria-hidden="true"></span>
+          <button class="cmt-transport-key cmt-command" data-command="3" type="button" data-tooltip="テープを巻き戻し"></button>
+        </div>
+        <div class="cmt-transport-row">
+          <span class="cmt-transport-label">REC <small>O</small></span>
+          <span id="cmt-led-rec" class="cmt-transport-led red" aria-hidden="true"></span>
+          <button id="cmt-rec" class="cmt-transport-key" type="button" aria-disabled="true"
+            data-tooltip="データ録音時は赤く点灯。アナログ録音キーは未実装です"></button>
+        </div>
+      </div>
+    </section>
+    <div class="drive-stack">
+      <div class="drive" data-drive="0">
+        <div class="drive-ident"><span class="lamp" id="lamp0" aria-hidden="true"></span><span class="dlabel">FD1</span></div>
+        <div class="drive-slot">
+          <span class="disk-meta">
+            <span class="disk-row" data-tooltip="読み込んだD88ファイルの名前"><span class="disk-key">FILE</span><span class="disk-value" id="dfilename0">NO DISK</span></span>
+            <span class="disk-row" data-tooltip="D88ヘッダー内のディスク名"><span class="disk-key">DISK</span><span class="disk-value" id="dtitle0">—</span></span>
+          </span>
+          <select id="vol0" class="volsel" aria-label="FD1 volume" hidden></select>
+        </div>
+        <div class="drive-actions">
+          <button class="icon-btn" id="ins0" type="button" aria-label="ディスクを交換"
+            data-tooltip="ディスクを交換（リセットしません）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h6l2 2h8v9H4z"/><path d="M8 13h8m0 0-2-2m2 2-2 2"/></svg>
+          </button>
+          <button class="icon-btn" id="eject0" type="button" aria-label="ディスクを取り出す"
+            data-tooltip="保存済みディスクを取り出す（次回はデモに戻ります）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 5 6 9H6z"/><path d="M6 18h12"/></svg>
+          </button>
+          <button class="icon-btn" id="blank0" type="button" aria-label="ブランクディスクを作成"
+            data-tooltip="未フォーマットのブランクディスクを入れる">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M12 11v6m-3-3h6"/></svg>
+          </button>
+          <button class="icon-btn" id="save0" type="button" aria-label="ディスクを保存"
+            data-tooltip="現在のディスクをD88ファイルとして保存">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10m0 0-4-4m4 4 4-4"/><path d="M5 16v4h14v-4"/></svg>
+          </button>
+          <button class="icon-btn" id="wp0" type="button" aria-pressed="false"
+            aria-label="ライトプロテクト" data-tooltip="ライトプロテクト（実機のタブ相当）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="10" width="12" height="10" rx="1"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="drive" data-drive="1">
+        <div class="drive-ident"><span class="lamp" id="lamp1" aria-hidden="true"></span><span class="dlabel">FD2</span></div>
+        <div class="drive-slot">
+          <span class="disk-meta">
+            <span class="disk-row" data-tooltip="読み込んだD88ファイルの名前"><span class="disk-key">FILE</span><span class="disk-value" id="dfilename1">NO DISK</span></span>
+            <span class="disk-row" data-tooltip="D88ヘッダー内のディスク名"><span class="disk-key">DISK</span><span class="disk-value" id="dtitle1">—</span></span>
+          </span>
+          <select id="vol1" class="volsel" aria-label="FD2 volume" hidden></select>
+        </div>
+        <div class="drive-actions">
+          <button class="icon-btn" id="ins1" type="button" aria-label="ディスクを交換"
+            data-tooltip="ディスクを交換（リセットしません）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h6l2 2h8v9H4z"/><path d="M8 13h8m0 0-2-2m2 2-2 2"/></svg>
+          </button>
+          <button class="icon-btn" id="eject1" type="button" aria-label="ディスクを取り出す"
+            data-tooltip="保存済みディスクを取り出す">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 5 6 9H6z"/><path d="M6 18h12"/></svg>
+          </button>
+          <button class="icon-btn" id="blank1" type="button" aria-label="ブランクディスクを作成"
+            data-tooltip="未フォーマットのブランクディスクを入れる">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M12 11v6m-3-3h6"/></svg>
+          </button>
+          <button class="icon-btn" id="save1" type="button" aria-label="ディスクを保存"
+            data-tooltip="現在のディスクをD88ファイルとして保存">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10m0 0-4-4m4 4 4-4"/><path d="M5 16v4h14v-4"/></svg>
+          </button>
+          <button class="icon-btn" id="wp1" type="button" aria-pressed="false"
+            aria-label="ライトプロテクト" data-tooltip="ライトプロテクト（実機のタブ相当）">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="10" width="12" height="10" rx="1"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="pocket-panel">
+      <label class="panel-control mode-control" data-tooltip="起動モード。変更後にIPLを押します">
+        <span>MODE</span>
+        <select id="boot-mode" aria-label="Boot mode">
+          <option value="0" selected>2500</option>
+          <option value="1">2000</option>
+          <option value="2">80B</option>
+        </select>
+      </label>
+      <label class="panel-control volume-control" data-tooltip="エミュレーターの主音量">
+        <span>VOLUME</span>
+        <input id="master-volume" type="range" min="0" max="1" step="0.05" value="1"
+          aria-label="Master volume">
+      </label>
+      <div class="panel-toggles">
+        <button id="tenkey-btn" class="panel-toggle" type="button" aria-pressed="false"
+          data-tooltip="カーソルキーをテンキーとして送る">T.KEY</button>
+        <button id="mouse-btn" class="panel-toggle" type="button" aria-pressed="false"
+          data-tooltip="マウス捕捉の入切">MOUSE</button>
+        <button id="vkbd-btn" class="panel-toggle" type="button" aria-pressed="false"
+          data-tooltip="画面上のキーボードを開閉">KEYBOARD</button>
+      </div>
+      <div class="round-controls">
+        <button id="reset-btn" class="round-control" type="button"
+          data-tooltip="CPUのみをリセット。RAM・画面・周辺機器は保持します">RESET</button>
+        <button id="ipl-btn" class="round-control" type="button"
+          data-tooltip="電源投入相当。MODEを読み取り、IPLから起動し直します">IPL</button>
+      </div>
+    </div>
     <!-- offscreen rather than display:none: WebKit refuses to open the file
          picker for an input that is not rendered -->
     <input type="file" id="file0" accept=".d88" class="offscreen">
     <input type="file" id="file1" accept=".d88" class="offscreen">
-  </div>
+  </section>
   <!-- filled in by emulator.js from the layout table, so the key caps and
        their matrix positions live in one place -->
   <section id="vkbd" hidden aria-label="MZ-2500 キーボード"></section>
@@ -124,34 +427,52 @@
     <span id="audio-stat"></span>
     <button id="debug-toggle" title="デバッグ情報の表示/非表示">DEBUG</button>
   </div>
-  <section class="help">
-    <p>SPACE = 決定 / ジャンプ ・ カーソルキー = 移動 ・ Z = ダッシュ<br>
-      ゲームパッド: A / × = トリガ1 ・ B / ○ = トリガ2 ・ 十字キーまたは左スティック = 移動
-      （割り当ては左の「ゲームパッドのボタン割り当て」で変更できます）<br>
-      <span class="fine">NEKO CAN RUN の初期設定はトリガ2 = ジャンプ、トリガ1 = ダッシュです。
-        タイトル画面の CONFIG で入れ替えられます。</span></p>
-    <p>ドライブ横の「キーボード」ボタンで<strong>画面上のキーボード</strong>を開閉できます（実機と同じキー配列）。
-      GRAPH・カナ・LOCK・変換・無変換・HELP・COPY・HOME/CLR・BREAK・アルゴ、テンキーの <code>*</code> <code>/</code> など、
-      パソコンのキーボードに無いキーはここから押せます。開閉の状態は保存されます。<br>
-      <strong>SHIFT・CTRL・GRAPH・カナ・LOCK は押すと固定</strong>され（もう一度押すと戻ります）、
-      片手・マウスだけでも SHIFT + BREAK や GRAPH + キーのような同時押しができます。
-      それ以外のキーは押している間だけ入り、押したまま指やポインタが外れると離した扱いになります。
-      画面上のキーボードとパソコンのキーボードは同時に使えます。</p>
-    <p>画面へ D88 をドロップ = FD1 に入れて起動（IPLPRO ブートのみ）。
-      各ドライブの「入替」やドライブ枠へのドロップ = リセットせずディスク交換。
-      複数ボリューム入り D88 は自動分割され、ドライブ横のプルダウンで枚を切り替えられます（2枚組対応）。
-      入れたディスクは<strong>このブラウザ内に保存</strong>され（外部送信なし）、次回もそのまま起動します。⏏ で保存を消去。</p>
-    <p>同梱の <strong>NEKO CAN RUN デモ版</strong>（WORLD 1）は動作検証を兼ねたサンプルです。
-      デモ版・製品版（有償・全4ワールド）は
-      <a href="https://zabaglione.booth.pm/items/8672891" target="_blank" rel="noopener">BOOTH（ザバイオーネ研究室）</a>
-      にて配布中。</p>
+  <section id="io-bay" hidden aria-label="Data input and output">
+    <header class="io-bay-header"><span>I/O BAY</span><span>HOST INTERFACE</span></header>
+    <section id="sio-io-panel" class="io-panel" hidden aria-labelledby="sio-io-title">
+      <header><h2 id="sio-io-title">SERIAL / RS-232C</h2>
+        <button id="sio-io-close" class="io-close" type="button" aria-label="Close serial panel"
+          data-tooltip="シリアル入出力欄を閉じる">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <textarea id="sio-terminal" rows="8" readonly spellcheck="false"
+        aria-label="Captured SIO output"></textarea>
+      <div class="sio-row">
+        <input id="sio-input" type="text" autocomplete="off" placeholder="ASCII or \xHH">
+        <button id="sio-send" class="insbtn" type="button">Send</button>
+      </div>
+      <div class="io-actions">
+        <label class="fine"><input id="sio-append-cr" type="checkbox" checked>Append CR</label>
+        <button id="sio-clear" class="insbtn" type="button">Clear</button>
+        <button id="sio-save" class="insbtn" type="button">Save TX</button>
+      </div>
+    </section>
+    <section id="printer-io-panel" class="io-panel" hidden aria-labelledby="printer-io-title">
+      <header><h2 id="printer-io-title">PARALLEL / PRINTER</h2>
+        <button id="printer-io-close" class="io-close" type="button" aria-label="Close printer panel"
+          data-tooltip="パラレル出力欄を閉じる">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <textarea id="printer-preview" rows="6" readonly spellcheck="false"
+        aria-label="Captured printer output"></textarea>
+      <div class="io-actions">
+        <button id="printer-save" class="insbtn" type="button">Save raw</button>
+        <button id="printer-clear" class="insbtn" type="button">Clear</button>
+      </div>
+    </section>
+  </section>
+  <details id="about-panel">
+    <summary>ABOUT / COMPATIBILITY</summary>
     <p class="fine"><strong>動作について：</strong>市販ソフトやフリーソフトで動作検証を行っていますが、
       <strong>すべてのソフトウェアの動作を保証するものではありません。</strong>
-      未実装の周辺機器や、実機と挙動が異なる箇所が残っています。動かないソフトがあってもご容赦ください。</p>
+      未実装の周辺機器や、実機と挙動が異なる箇所が残っています。</p>
     <p class="fine">本体ROM不使用（ブートはネイティブ代替実装）。ゲーム: (C) 2026 ZABAGLIONE PROJECT /
       Emulator: MIT License, CPU core: superzazu/z80 (MIT), FM: ymfm (BSD-3-Clause).
-      挙動検証は EmuZ-2500 (Common Source Code Project) をブラックボックスオラクルとして実施。</p>
-  </section>
+      EmuZ-2500 (Common Source Code Project) is used only as a black-box gold master.
+      Its internal implementation, source code and data are not used.</p>
+  </details>
   </div>
   <aside id="right-pane">
     <div id="debug-panel" hidden>

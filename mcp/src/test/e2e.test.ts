@@ -2,7 +2,7 @@
 // over stdio, exactly as an AI agent would.
 //
 // The BASIC demos need the user's own ROMs and BASIC disk:
-//   MZ2500_ROM_DIR   directory holding ipl.rom / cg.rom / kanji.rom / dict.rom
+//   MZ2500_ROM_DIR   directory holding ipl.rom / kanji.rom / dict.rom
 //   MZ2500_DISK_A    the BASIC-M25 boot disk (.d88)
 // They are skipped (not failed) when those are absent. The ROM-less smoke
 // test only needs the bundled NEKO demo disk from tools/build_wasm.sh.

@@ -53,6 +53,8 @@ public:
     // Physical addressing (sector is 1-based as in the ID field). Returns
     // nullptr when the sector does not exist on the mounted image.
     const uint8_t* raw_sector(int cylinder, int side, int sector) const;
+    const uint8_t* raw_sector(int cylinder, int side, int sector,
+                              bool single_density) const;
 
     // Logical block addressing used by the build tools:
     // track = lba/16 (D88 track index), sector = lba%16 + 1.
@@ -72,9 +74,13 @@ public:
     // state machine writing one byte per cycle) must not cache it; re-call
     // write_sector() to get a fresh pointer instead.
     uint8_t* write_sector(int cylinder, int side, int sector);
+    uint8_t* write_sector(int cylinder, int side, int sector,
+                          bool single_density);
 
     // Set or clear the deleted-data mark the FDC reports on the next read.
     bool set_deleted_mark(int cylinder, int side, int sector, bool deleted);
+    bool set_deleted_mark(int cylinder, int side, int sector, bool deleted,
+                          bool single_density);
 
     // Whether a sector currently carries the deleted-data mark (false when
     // the sector does not exist). READ SECTOR consults this to report
@@ -82,6 +88,8 @@ public:
     // the two must agree on the same field or a driver that marks a bad
     // record and reads it back to detect that never will.
     bool deleted_mark(int cylinder, int side, int sector) const;
+    bool deleted_mark(int cylinder, int side, int sector,
+                      bool single_density) const;
 
     // Lay a track down, replacing whatever was there. The sector order is
     // kept exactly as handed in - the interleave belongs to the software
@@ -107,7 +115,11 @@ public:
 private:
     static int track_index(int cylinder, int side) { return cylinder * 2 + side; }
     const Sector* find_sector(int cylinder, int side, int sector) const;
+    const Sector* find_sector(int cylinder, int side, int sector,
+                              bool single_density) const;
     Sector* find_sector_mut(int cylinder, int side, int sector);
+    Sector* find_sector_mut(int cylinder, int side, int sector,
+                            bool single_density);
 
     Track tracks_[TRACK_COUNT];
     bool loaded_ = false;

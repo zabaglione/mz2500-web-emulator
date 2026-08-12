@@ -26,6 +26,8 @@ void FdcMb8877::reset() {
     side_ = 0;
     drive_ = 0;
     motor_ = false;
+    single_density_ = false;
+    command_single_density_ = false;
     busy_until_ = 0;
     read_valid_ = false;
     read_index_ = 0;
@@ -71,14 +73,14 @@ void FdcMb8877::reset() {
 // in multi-sector mode the search for the next sequential record has
 // already begun, exactly as it would on real hardware.
 void FdcMb8877::advance_read_realtime(uint64_t now) {
-    while (read_index_ < 256 && now >= read_last_access_ + CYC_PER_BYTE * 256) {
+    while (read_index_ < 256 && now >= read_last_access_ + byte_cycles() * 256) {
         done_status_ |= ST_LOST;
         if (read_multiple_ && sector_reg_ < 255) {
             sector_reg_++;
             read_sector_ = sector_reg_;
             if (active_sector() != nullptr) {
                 read_index_ = 0;
-                read_start_ = byte_ready(256) + CYC_PER_BYTE * 2;
+                read_start_ = byte_ready(256) + byte_cycles() * 2;
                 read_last_access_ = read_start_; // fresh quiet window for the new sector
                 // ST_REC_TYPE reflects the sector just landed on, not the
                 // one the walk left behind; ST_LOST (already ORed in above)
@@ -95,7 +97,7 @@ void FdcMb8877::advance_read_realtime(uint64_t now) {
             return;
         }
         read_index_ = 256;
-        busy_until_ = byte_ready(256) + CYC_PER_BYTE * 2;
+        busy_until_ = byte_ready(256) + byte_cycles() * 2;
         return;
     }
 }
@@ -114,14 +116,14 @@ void FdcMb8877::advance_read_realtime(uint64_t now) {
 // outcome than a documented deviation from real hardware, so this is a
 // conscious trade, not an oversight.
 void FdcMb8877::advance_write_realtime(uint64_t now) {
-    while (write_index_ < 256 && now >= write_last_access_ + CYC_PER_BYTE * 256) {
+    while (write_index_ < 256 && now >= write_last_access_ + byte_cycles() * 256) {
         done_status_ |= ST_LOST;
         if (write_multiple_ && sector_reg_ < 255) {
             sector_reg_++;
             read_sector_ = sector_reg_;
             if (write_target() != nullptr) {
                 write_index_ = 0;
-                write_start_ = byte_due(write_start_, 256) + CYC_PER_BYTE * 2;
+                write_start_ = byte_due(write_start_, 256) + byte_cycles() * 2;
                 write_last_access_ = write_start_; // fresh quiet window for the new sector
                 continue;
             }
@@ -131,7 +133,7 @@ void FdcMb8877::advance_write_realtime(uint64_t now) {
             return;
         }
         write_index_ = 256;
-        busy_until_ = byte_due(write_start_, 256) + CYC_PER_BYTE * 2;
+        busy_until_ = byte_due(write_start_, 256) + byte_cycles() * 2;
         return;
     }
 }
@@ -145,10 +147,10 @@ void FdcMb8877::advance_write_realtime(uint64_t now) {
 // otherwise spin BUSY forever, the same failure mode advance_read_realtime()
 // fixes for READ SECTOR.
 void FdcMb8877::advance_readaddr_realtime(uint64_t now) {
-    if (id_index_ < 6 && now >= id_last_access_ + CYC_PER_BYTE * 6) {
+    if (id_index_ < 6 && now >= id_last_access_ + byte_cycles() * 6) {
         done_status_ |= ST_LOST;
         id_index_ = 6;
-        busy_until_ = byte_ready(6) + CYC_PER_BYTE;
+        busy_until_ = byte_ready(6) + byte_cycles();
     }
 }
 
@@ -161,12 +163,12 @@ void FdcMb8877::advance_readaddr_realtime(uint64_t now) {
 // track_stream_ (possibly none), exactly as a FORCE INTERRUPT or the next
 // command arriving mid-format already does.
 void FdcMb8877::advance_writetrack_realtime(uint64_t now) {
-    if (track_index_ < TRACK_STREAM_BYTES &&
-        now >= track_last_access_ + CYC_PER_BYTE * TRACK_STREAM_BYTES) {
+    if (track_index_ < track_stream_bytes() &&
+        now >= track_last_access_ + byte_cycles() * track_stream_bytes()) {
         done_status_ |= ST_LOST;
         commit_track_stream();
-        track_index_ = TRACK_STREAM_BYTES;
-        busy_until_ = byte_due(write_start_, TRACK_STREAM_BYTES) + CYC_PER_BYTE * 2;
+        track_index_ = track_stream_bytes();
+        busy_until_ = byte_due(write_start_, track_stream_bytes()) + byte_cycles() * 2;
     }
 }
 
@@ -177,10 +179,10 @@ void FdcMb8877::advance_writetrack_realtime(uint64_t now) {
 void FdcMb8877::advance_readtrack_realtime(uint64_t now) {
     const int total = (int)read_track_stream_.size();
     if (total > 0 && read_track_index_ < total &&
-        now >= read_track_last_access_ + CYC_PER_BYTE * (uint64_t)total) {
+        now >= read_track_last_access_ + byte_cycles() * (uint64_t)total) {
         done_status_ |= ST_LOST;
         read_track_index_ = total;
-        busy_until_ = byte_ready(total) + CYC_PER_BYTE * 2;
+        busy_until_ = byte_ready(total) + byte_cycles() * 2;
     }
 }
 
@@ -241,7 +243,7 @@ uint8_t FdcMb8877::status_at(uint64_t now) {
         // WRITE TRACK is a write-type command: bit6 carries WRITE PROTECT
         // during its busy phase, same as State::Write.
         advance_writetrack_realtime(now);
-        if (track_index_ >= TRACK_STREAM_BYTES) {
+        if (track_index_ >= track_stream_bytes()) {
             if (now < busy_until_) return ST_BUSY | wp;
             state_ = State::Idle;
             return done_status_ | wp;
@@ -292,7 +294,7 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
         if (state_ == State::ReadAddr && id_index_ < 6 &&
             now >= byte_ready(id_index_)) {
             const uint8_t value = id_bytes_[id_index_++];
-            if (id_index_ >= 6) busy_until_ = byte_ready(6) + CYC_PER_BYTE;
+            if (id_index_ >= 6) busy_until_ = byte_ready(6) + byte_cycles();
             return value;
         }
         if (state_ == State::ReadTrack &&
@@ -300,7 +302,7 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
             now >= byte_ready(read_track_index_)) {
             const uint8_t value = read_track_stream_[read_track_index_++];
             if (read_track_index_ >= (int)read_track_stream_.size())
-                busy_until_ = byte_ready(read_track_index_) + CYC_PER_BYTE;
+                busy_until_ = byte_ready(read_track_index_) + byte_cycles();
             return value;
         }
         if (state_ == State::Read && read_valid_ && read_index_ < 256 &&
@@ -315,7 +317,7 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
                     read_sector_ = sector_reg_;
                     if (active_sector() != nullptr) {
                         read_index_ = 0;
-                        read_start_ = byte_ready(256) + CYC_PER_BYTE * 2;
+                        read_start_ = byte_ready(256) + byte_cycles() * 2;
                         // ST_REC_TYPE reflects the sector just landed on.
                         if (active_sector_deleted()) done_status_ |= ST_REC_TYPE;
                         else done_status_ &= (uint8_t)~ST_REC_TYPE;
@@ -331,7 +333,7 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
                     return value;
                 }
                 // busy stays up while the CRC bytes pass under the head
-                busy_until_ = byte_ready(256) + CYC_PER_BYTE * 2;
+                busy_until_ = byte_ready(256) + byte_cycles() * 2;
             }
             return value;
         }
@@ -389,6 +391,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             state_ = State::TypeI;
             busy_until_ = now + step_cycles_;
         } else if ((cmd & 0xE0) == 0x80) { // READ SECTOR
+            command_single_density_ = single_density_;
             read_multiple_ = (cmd & 0x10) != 0;
             stat_reads++;
             last_type1_ = false;
@@ -411,10 +414,11 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 // it, or firmware that writes a bad-sector mark and reads it
                 // back to confirm never will.
                 done_status_ = active_sector_deleted() ? ST_REC_TYPE : 0;
-                read_start_ = now + read_latency_cycles_ + CYC_PER_BYTE;
+                read_start_ = now + read_latency_cycles_ + byte_cycles();
                 read_last_access_ = read_start_; // quiet-window clock starts fresh
             }
         } else if ((cmd & 0xE0) == 0xA0) { // WRITE SECTOR
+            command_single_density_ = single_density_;
             last_type1_ = false;
             write_multiple_ = (cmd & 0x10) != 0;
             read_drive_ = drive_;
@@ -444,12 +448,14 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             } else {
                 D88Disk* d = disks_[read_drive_];
                 if (d) d->set_deleted_mark(read_cyl_, read_side_, read_sector_,
-                                           (cmd & 0x01) != 0);
+                                           (cmd & 0x01) != 0,
+                                           command_single_density_);
                 done_status_ = 0;
-                write_start_ = now + read_latency_cycles_ + CYC_PER_BYTE;
+                write_start_ = now + read_latency_cycles_ + byte_cycles();
                 write_last_access_ = write_start_; // quiet-window clock starts fresh
             }
         } else if ((cmd & 0xF0) == 0xC0) { // READ ADDRESS
+            command_single_density_ = single_density_;
             last_type1_ = false;
             read_drive_ = drive_;
             read_cyl_ = phys_cyl_[drive_];
@@ -468,8 +474,17 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 id_track_side_ = read_side_;
             }
             const D88Disk* d = disks_[read_drive_];
-            const D88Disk::Sector* sec =
-                d ? d->sector_at(read_cyl_, read_side_, id_next_++) : nullptr;
+            const D88Disk::Sector* sec = nullptr;
+            const int count = d ? d->sector_count(read_cyl_, read_side_) : 0;
+            for (int scanned = 0; scanned < count; scanned++) {
+                const D88Disk::Sector* candidate =
+                    d->sector_at(read_cyl_, read_side_, id_next_++);
+                if (candidate &&
+                    ((candidate->density & 0x40) != 0) == command_single_density_) {
+                    sec = candidate;
+                    break;
+                }
+            }
             state_ = State::ReadAddr;
             if (!sec) {
                 id_index_ = 6;
@@ -484,10 +499,11 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 id_bytes_[5] = 0;
                 sector_reg_ = sec->c; // the chip copies the track address here
                 done_status_ = 0;
-                read_start_ = now + read_latency_cycles_ + CYC_PER_BYTE;
+                read_start_ = now + read_latency_cycles_ + byte_cycles();
                 id_last_access_ = read_start_; // quiet-window clock starts fresh
             }
         } else if ((cmd & 0xF0) == 0xF0) { // WRITE TRACK (physical format)
+            command_single_density_ = single_density_;
             last_type1_ = false;
             read_drive_ = drive_;
             read_cyl_ = phys_cyl_[drive_];
@@ -501,9 +517,10 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             }
             state_ = State::WriteTrack;
             done_status_ = 0;
-            write_start_ = now + read_latency_cycles_ + CYC_PER_BYTE;
+            write_start_ = now + read_latency_cycles_ + byte_cycles();
             track_last_access_ = write_start_; // quiet-window clock starts fresh
         } else if ((cmd & 0xF0) == 0xE0) { // READ TRACK
+            command_single_density_ = single_density_;
             last_type1_ = false;
             read_drive_ = drive_;
             read_cyl_ = phys_cyl_[drive_];
@@ -511,11 +528,13 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             read_track_stream_.clear();
             read_track_index_ = 0;
             const D88Disk* d = disks_[read_drive_];
-            for (int i = 0; i < 40; i++) read_track_stream_.push_back(0x4E);
+            const uint8_t gap = command_single_density_ ? 0xFF : 0x4E;
+            for (int i = 0; i < 40; i++) read_track_stream_.push_back(gap);
             const int count = d ? d->sector_count(read_cyl_, read_side_) : 0;
             for (int i = 0; i < count; i++) {
                 const D88Disk::Sector* sec = d->sector_at(read_cyl_, read_side_, i);
                 if (!sec) break;
+                if (((sec->density & 0x40) != 0) != command_single_density_) continue;
                 for (int g = 0; g < 12; g++) read_track_stream_.push_back(0x00);
                 read_track_stream_.push_back(0xFE);
                 read_track_stream_.push_back(sec->c);
@@ -523,14 +542,21 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 read_track_stream_.push_back(sec->r);
                 read_track_stream_.push_back(sec->n);
                 read_track_stream_.push_back(0xF7);
-                for (int g = 0; g < 22; g++) read_track_stream_.push_back(0x4E);
+                for (int g = 0; g < 22; g++) read_track_stream_.push_back(gap);
                 read_track_stream_.push_back(sec->deleted ? 0xF8 : 0xFB);
                 for (uint8_t b : sec->data) read_track_stream_.push_back(b);
                 read_track_stream_.push_back(0xF7);
-                for (int g = 0; g < 24; g++) read_track_stream_.push_back(0x4E);
+                for (int g = 0; g < 24; g++) read_track_stream_.push_back(gap);
             }
             state_ = State::ReadTrack;
             if (read_track_stream_.size() > 40) {
+                // READ TRACK runs from one index pulse to the next. D88 stores
+                // records rather than the encoded bit-cell stream, so pad a
+                // short synthesis with the density-specific gap byte or cut a
+                // long one at the next index boundary. This also keeps the
+                // transfer at exactly one 300 rpm revolution: 6250 bytes at
+                // MFM 250 kbps or 3125 bytes at FM 125 kbps.
+                read_track_stream_.resize((size_t)track_stream_bytes(), gap);
                 done_status_ = 0;
             } else {
                 // Blank track: the stream is only the leading gap, so DRQ
@@ -547,7 +573,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 done_status_ = ST_RNF;
                 busy_until_ = now + CYC_PER_REV;
             }
-            read_start_ = now + read_latency_cycles_ + CYC_PER_BYTE;
+            read_start_ = now + read_latency_cycles_ + byte_cycles();
             read_track_last_access_ = read_start_; // quiet-window clock starts fresh
         } else if ((cmd & 0xF0) == 0xD0) { // FORCE INTERRUPT
             // The MB8877 returns Type I status after FORCE INTERRUPT
@@ -588,13 +614,13 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
         // Same idea for WRITE TRACK's own quiet-window fallback
         // (advance_writetrack_realtime()).
         if (state_ == State::WriteTrack) track_last_access_ = clamp_access(now, write_start_);
-        if (state_ == State::WriteTrack && track_index_ < TRACK_STREAM_BYTES &&
+        if (state_ == State::WriteTrack && track_index_ < track_stream_bytes() &&
             now >= byte_due(write_start_, track_index_)) {
             track_stream_.push_back(value);
             track_index_++;
-            if (track_index_ >= TRACK_STREAM_BYTES) {
+            if (track_index_ >= track_stream_bytes()) {
                 commit_track_stream();
-                busy_until_ = byte_due(write_start_, track_index_) + CYC_PER_BYTE * 2;
+                busy_until_ = byte_due(write_start_, track_index_) + byte_cycles() * 2;
             }
         }
         if (state_ == State::Write && write_index_ < 256 &&
@@ -609,7 +635,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                     read_sector_ = sector_reg_;
                     if (write_target() != nullptr) {
                         write_index_ = 0;
-                        write_start_ = byte_due(write_start_, 256) + CYC_PER_BYTE * 2;
+                        write_start_ = byte_due(write_start_, 256) + byte_cycles() * 2;
                         data_reg_ = value;
                         break;
                     }
@@ -623,7 +649,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                     data_reg_ = value;
                     break;
                 }
-                busy_until_ = byte_due(write_start_, 256) + CYC_PER_BYTE * 2;
+                busy_until_ = byte_due(write_start_, 256) + byte_cycles() * 2;
             }
         }
         data_reg_ = value;
@@ -659,6 +685,7 @@ void FdcMb8877::commit_track_stream() {
         sec.h = track_stream_[i + 2];
         sec.r = track_stream_[i + 3];
         sec.n = track_stream_[i + 4];
+        sec.density = command_single_density_ ? 0x40 : 0x00;
         i += 5;
         // walk to the data address mark
         while (i < n && track_stream_[i] != 0xFB && track_stream_[i] != 0xF8 &&

@@ -5,7 +5,7 @@
 // samples, so delay is bounded even if this estimate ever drifts.)
 //
 // Two floppy drives are exposed (FD1/FD2, matching the real cabinet):
-// per-drive hot insert never resets the machine, RESET reboots from FD1,
+// per-drive hot insert never resets the machine, IPL reboots from FD1,
 // and concatenated multi-volume D88 files are split into a per-drive
 // volume selector so multi-disk software can swap sides mid-game.
 "use strict";
@@ -117,14 +117,33 @@ const statusEl = document.getElementById("status");
 const fpsEl = document.getElementById("fps");
 const audioStatEl = document.getElementById("audio-stat");
 const lampEls = [document.getElementById("lamp0"), document.getElementById("lamp1")];
-const dnameEls = [document.getElementById("dname0"), document.getElementById("dname1")];
+const diskFilenameEls = [document.getElementById("dfilename0"), document.getElementById("dfilename1")];
+const diskTitleEls = [document.getElementById("dtitle0"), document.getElementById("dtitle1")];
 const volEls = [document.getElementById("vol0"), document.getElementById("vol1")];
 const fileEls = [document.getElementById("file0"), document.getElementById("file1")];
+const masterVolumeEl = document.getElementById("master-volume");
 
 let Module = null;
 let audioCtx = null;
 let workletNode = null;
+let masterGainNode = null;
 let running = false;
+
+const savedMasterVolumeText = localStorage.getItem("mzw_master_volume");
+const savedMasterVolume = savedMasterVolumeText === null ? 1 : Number(savedMasterVolumeText);
+masterVolumeEl.value = Number.isFinite(savedMasterVolume)
+  ? String(Math.min(1, Math.max(0, savedMasterVolume))) : "1";
+
+function applyMasterVolume() {
+  const value = Number(masterVolumeEl.value);
+  if (masterGainNode && audioCtx)
+    masterGainNode.gain.setTargetAtTime(value, audioCtx.currentTime, 0.01);
+}
+
+masterVolumeEl.addEventListener("input", () => {
+  localStorage.setItem("mzw_master_volume", masterVolumeEl.value);
+  applyMasterVolume();
+});
 
 // audio-clock bookkeeping: samples handed to the worklet vs. samples the
 // hardware has consumed (audioCtx.currentTime is the consumption clock)
@@ -137,8 +156,1160 @@ let lastReportedQueued = 0;
 let framesShown = 0;
 let fpsWindowStart = 0;
 
+// ---- RS-232C / Z80 SIO ---------------------------------------------------
+// The core owns register timing, the three-byte receive FIFO, interrupts and
+// the CDh clock divider. This layer only supplies a transport: a local
+// terminal, a timed loopback, or a user-selected Web Serial adapter.
+const sioChannelEl = document.getElementById("sio-channel");
+const sioTransportEl = document.getElementById("sio-transport");
+const sioConnectEl = document.getElementById("sio-connect");
+const sioConnectionEl = document.getElementById("sio-connection");
+const sioLineEl = document.getElementById("sio-line");
+const sioTerminalEl = document.getElementById("sio-terminal");
+const sioInputEl = document.getElementById("sio-input");
+const sioSendEl = document.getElementById("sio-send");
+const sioAppendCrEl = document.getElementById("sio-append-cr");
+const sioClearEl = document.getElementById("sio-clear");
+const sioSaveEl = document.getElementById("sio-save");
+const ioBayEl = document.getElementById("io-bay");
+const sioIoPanelEl = document.getElementById("sio-io-panel");
+const printerIoPanelEl = document.getElementById("printer-io-panel");
+const sioIoToggleEl = document.getElementById("sio-io-toggle");
+const printerIoToggleEl = document.getElementById("printer-io-toggle");
+const sioIoCloseEl = document.getElementById("sio-io-close");
+const printerIoCloseEl = document.getElementById("printer-io-close");
+
+function setIoPanelVisible(kind, visible) {
+  const serial = kind === "sio";
+  const panel = serial ? sioIoPanelEl : printerIoPanelEl;
+  const toggle = serial ? sioIoToggleEl : printerIoToggleEl;
+  panel.hidden = !visible;
+  toggle.setAttribute("aria-expanded", visible ? "true" : "false");
+  toggle.textContent = visible
+    ? (serial ? "HIDE I/O" : "HIDE OUTPUT")
+    : (serial ? "OPEN I/O" : "OPEN OUTPUT");
+  ioBayEl.hidden = sioIoPanelEl.hidden && printerIoPanelEl.hidden;
+}
+
+sioIoToggleEl.addEventListener("click", () => {
+  setIoPanelVisible("sio", sioIoPanelEl.hidden);
+});
+printerIoToggleEl.addEventListener("click", () => {
+  setIoPanelVisible("printer", printerIoPanelEl.hidden);
+});
+sioIoCloseEl.addEventListener("click", () => setIoPanelVisible("sio", false));
+printerIoCloseEl.addEventListener("click", () => setIoPanelVisible("printer", false));
+
+const SIO_CAPTURE_LIMIT = 1024 * 1024;
+const SIO_RENDER_LIMIT = 16 * 1024;
+const sioCapture = [[], []];
+const sioCaptureDropped = [0, 0];
+let sioTerminalDirty = true;
+let sioAppliedModem = [null, null];
+
+let webSerialPort = null;
+let webSerialChannel = -1;
+let webSerialReader = null;
+let webSerialWriter = null;
+let webSerialReadTask = null;
+let webSerialOpenSignature = "";
+let webSerialWriteChain = Promise.resolve();
+let webSerialSignalChain = Promise.resolve();
+let webSerialSignalPollBusy = false;
+let webSerialLastSignalPoll = 0;
+let webSerialLastOutputs = "";
+let webSerialInputs = { cts: true, dcd: true };
+let webSerialDisconnecting = false;
+
+function selectedSioChannel() {
+  return parseInt(sioChannelEl.value, 10) & 1;
+}
+
+function sioLineConfig(channel) {
+  if (!Module) return null;
+  return {
+    baud: Module._emu_sio_baud(channel),
+    rxBits: Module._emu_sio_rx_bits(channel),
+    txBits: Module._emu_sio_tx_bits(channel),
+    stopHalfBits: Module._emu_sio_stop_half_bits(channel),
+    parity: Module._emu_sio_parity(channel),
+    rxEnabled: Module._emu_sio_rx_enabled(channel) !== 0,
+    txEnabled: Module._emu_sio_tx_enabled(channel) !== 0,
+    routed: Module._emu_sio_rs232_connected(channel) !== 0,
+    dtr: Module._emu_sio_dtr(channel) !== 0,
+    rts: Module._emu_sio_rts(channel) !== 0,
+    breakOn: Module._emu_sio_break(channel) !== 0,
+  };
+}
+
+function parityLabel(parity) {
+  return parity === 1 ? "O" : parity === 2 ? "E" : "N";
+}
+
+function stopBitsLabel(halfBits) {
+  if (halfBits === 2) return "1";
+  if (halfBits === 3) return "1.5";
+  if (halfBits === 4) return "2";
+  return "sync";
+}
+
+function sioSignature(config) {
+  return config ? [config.baud, config.rxBits, config.txBits,
+                    config.parity, config.stopHalfBits].join(":") : "";
+}
+
+function webSerialOptions(config) {
+  if (!config || !config.routed) return { error: "RS-232C path is not selected" };
+  if (!config.baud) return { error: "SIO clock is stopped" };
+  if (config.rxBits !== config.txBits)
+    return { error: "Web Serial needs equal RX and TX data bits" };
+  if (config.rxBits !== 7 && config.rxBits !== 8)
+    return { error: "Web Serial supports only 7 or 8 data bits" };
+  if (config.stopHalfBits !== 2 && config.stopHalfBits !== 4)
+    return { error: "Web Serial supports only 1 or 2 stop bits" };
+  return {
+    options: {
+      baudRate: config.baud,
+      dataBits: config.rxBits,
+      stopBits: config.stopHalfBits / 2,
+      parity: config.parity === 1 ? "odd" : config.parity === 2 ? "even" : "none",
+      flowControl: "none",
+    },
+  };
+}
+
+function setSioConnection(text, error = false) {
+  sioConnectionEl.textContent = text;
+  sioConnectionEl.classList.toggle("error", error);
+}
+
+function desiredSioModem(channel) {
+  const selected = selectedSioChannel();
+  const config = sioLineConfig(channel);
+  if (!config || channel !== selected || !config.routed)
+    return { cts: false, dcd: false };
+
+  if (sioTransportEl.value === "terminal" || sioTransportEl.value === "loopback")
+    return { cts: true, dcd: true };
+  if (webSerialPort && webSerialChannel === channel) return webSerialInputs;
+  return { cts: false, dcd: false };
+}
+
+function syncSioModemInputs() {
+  if (!Module) return;
+  for (let channel = 0; channel < 2; channel++) {
+    const desired = desiredSioModem(channel);
+    const signature = `${desired.cts ? 1 : 0}:${desired.dcd ? 1 : 0}`;
+    if (sioAppliedModem[channel] === signature) continue;
+    Module._emu_sio_set_modem(channel, desired.cts ? 1 : 0, desired.dcd ? 1 : 0);
+    sioAppliedModem[channel] = signature;
+  }
+}
+
+function appendSioCapture(channel, bytes) {
+  const capture = sioCapture[channel];
+  for (const byte of bytes) capture.push(byte);
+  if (capture.length > SIO_CAPTURE_LIMIT) {
+    const excess = capture.length - SIO_CAPTURE_LIMIT;
+    capture.splice(0, excess);
+    sioCaptureDropped[channel] += excess;
+  }
+  if (channel === selectedSioChannel()) {
+    sioTerminalDirty = true;
+    if (bytes.length) setIoPanelVisible("sio", true);
+  }
+}
+
+function renderSioTerminal() {
+  if (!sioTerminalDirty) return;
+  const channel = selectedSioChannel();
+  const capture = sioCapture[channel];
+  const start = Math.max(0, capture.length - SIO_RENDER_LIMIT);
+  let text = "";
+  if (sioCaptureDropped[channel] || start)
+    text = `[${sioCaptureDropped[channel] + start} earlier byte(s) hidden]\n`;
+  let previousCr = false;
+  for (let i = start; i < capture.length; i++) {
+    const byte = capture[i];
+    if (byte === 0x0D) {
+      text += "\n";
+      previousCr = true;
+    } else if (byte === 0x0A) {
+      if (!previousCr) text += "\n";
+      previousCr = false;
+    } else if (byte === 0x09) {
+      text += "\t";
+      previousCr = false;
+    } else if (byte >= 0x20 && byte <= 0x7E) {
+      text += String.fromCharCode(byte);
+      previousCr = false;
+    } else {
+      text += `\\x${byte.toString(16).padStart(2, "0").toUpperCase()}`;
+      previousCr = false;
+    }
+  }
+  sioTerminalEl.value = text;
+  sioTerminalEl.scrollTop = sioTerminalEl.scrollHeight;
+  sioTerminalDirty = false;
+}
+
+function parseSioInput(text) {
+  const bytes = [];
+  for (let i = 0; i < text.length; i++) {
+    let code = text.charCodeAt(i);
+    if (code !== 0x5C) {
+      if (code > 0xFF) throw new Error("Input is limited to single-byte characters");
+      bytes.push(code);
+      continue;
+    }
+    if (++i >= text.length) { bytes.push(0x5C); break; }
+    const escape = text[i];
+    if (escape === "r") bytes.push(0x0D);
+    else if (escape === "n") bytes.push(0x0A);
+    else if (escape === "t") bytes.push(0x09);
+    else if (escape === "\\") bytes.push(0x5C);
+    else if (escape === "x" && /^[0-9a-fA-F]{2}$/.test(text.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(text.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      code = escape.charCodeAt(0);
+      if (code > 0xFF) throw new Error("Input is limited to single-byte characters");
+      bytes.push(code);
+    }
+  }
+  return bytes;
+}
+
+function injectSioBytes(channel, bytes) {
+  if (!Module) return 0;
+  let accepted = 0;
+  for (const byte of bytes) accepted += Module._emu_sio_rx_queue(channel, byte) ? 1 : 0;
+  return accepted;
+}
+
+function loopbackSioBytes(channel, bytes) {
+  if (!Module) return 0;
+  let accepted = 0;
+  for (const byte of bytes) accepted += Module._emu_sio_rx_now(channel, byte) ? 1 : 0;
+  return accepted;
+}
+
+function queueWebSerialWrite(bytes) {
+  const writer = webSerialWriter;
+  const port = webSerialPort;
+  if (!writer || !port || bytes.length === 0) return;
+  const copy = Uint8Array.from(bytes);
+  webSerialWriteChain = webSerialWriteChain.then(async () => {
+    if (webSerialPort === port && webSerialWriter === writer) await writer.write(copy);
+  }).catch((error) => {
+    if (webSerialPort === port) setSioConnection(`Write failed: ${error.message}`, true);
+  });
+}
+
+function pumpSio() {
+  if (!Module) return;
+  const selected = selectedSioChannel();
+  const mode = sioTransportEl.value;
+  for (let channel = 0; channel < 2; channel++) {
+    const bytes = [];
+    for (;;) {
+      const value = Module._emu_sio_tx_pop(channel);
+      if (value < 0) break;
+      bytes.push(value);
+    }
+    if (!bytes.length || !Module._emu_sio_rs232_connected(channel)) continue;
+    appendSioCapture(channel, bytes);
+    if (channel !== selected) continue;
+    if (mode === "loopback") loopbackSioBytes(channel, bytes);
+    else if (mode === "webserial" && webSerialPort && webSerialChannel === channel)
+      queueWebSerialWrite(bytes);
+  }
+  renderSioTerminal();
+}
+
+async function readWebSerial(port, channel) {
+  try {
+    while (webSerialPort === port && port.readable) {
+      const reader = port.readable.getReader();
+      webSerialReader = reader;
+      try {
+        while (webSerialPort === port) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && Module && Module._emu_sio_rs232_connected(channel))
+            injectSioBytes(channel, value);
+        }
+      } finally {
+        if (webSerialReader === reader) webSerialReader = null;
+        reader.releaseLock();
+      }
+    }
+  } catch (error) {
+    if (webSerialPort === port) setSioConnection(`Read failed: ${error.message}`, true);
+  }
+}
+
+async function pollWebSerialSignals(now) {
+  const port = webSerialPort;
+  if (!port || webSerialSignalPollBusy || now - webSerialLastSignalPoll < 100) return;
+  webSerialLastSignalPoll = now;
+  webSerialSignalPollBusy = true;
+  try {
+    const signals = await port.getSignals();
+    if (webSerialPort === port) {
+      webSerialInputs = {
+        cts: signals.clearToSend !== false,
+        dcd: signals.dataCarrierDetect !== false,
+      };
+      syncSioModemInputs();
+    }
+  } catch (error) {
+    if (webSerialPort === port) {
+      webSerialInputs = { cts: true, dcd: true };
+      syncSioModemInputs();
+    }
+  } finally {
+    webSerialSignalPollBusy = false;
+  }
+}
+
+function updateWebSerialOutputs(config) {
+  const port = webSerialPort;
+  if (!port || !config) return;
+  const signature = `${config.dtr ? 1 : 0}:${config.rts ? 1 : 0}:${config.breakOn ? 1 : 0}`;
+  if (signature === webSerialLastOutputs) return;
+  webSerialLastOutputs = signature;
+  webSerialSignalChain = webSerialSignalChain.then(async () => {
+    if (webSerialPort !== port) return;
+    await port.setSignals({
+      dataTerminalReady: config.dtr,
+      requestToSend: config.rts,
+      break: config.breakOn,
+    });
+  }).catch((error) => {
+    if (webSerialPort === port) setSioConnection(`Signal update failed: ${error.message}`, true);
+  });
+}
+
+async function disconnectWebSerial(message = "Disconnected") {
+  if (webSerialDisconnecting) return;
+  const port = webSerialPort;
+  if (!port) { setSioConnection(message); return; }
+  webSerialDisconnecting = true;
+  webSerialPort = null;
+  webSerialChannel = -1;
+  webSerialOpenSignature = "";
+  webSerialLastOutputs = "";
+  const reader = webSerialReader;
+  try {
+    if (reader) await reader.cancel();
+    if (webSerialReadTask) await webSerialReadTask;
+    await webSerialWriteChain;
+    if (webSerialWriter) webSerialWriter.releaseLock();
+    webSerialWriter = null;
+    await port.close();
+  } catch (error) {
+    setSioConnection(`Disconnect failed: ${error.message}`, true);
+  } finally {
+    webSerialReadTask = null;
+    webSerialReader = null;
+    webSerialInputs = { cts: true, dcd: true };
+    webSerialDisconnecting = false;
+    sioAppliedModem = [null, null];
+    syncSioModemInputs();
+    updateSioUi();
+    if (!sioConnectionEl.classList.contains("error")) setSioConnection(message);
+  }
+}
+
+async function connectWebSerial() {
+  if (webSerialPort) { await disconnectWebSerial(); return; }
+  if (!Module) { setSioConnection("Power on first", true); return; }
+  if (!("serial" in navigator)) {
+    setSioConnection("Web Serial is unavailable in this browser", true);
+    return;
+  }
+  const channel = selectedSioChannel();
+  const config = sioLineConfig(channel);
+  const result = webSerialOptions(config);
+  if (result.error) { setSioConnection(result.error, true); return; }
+
+  let port = null;
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open(result.options);
+    webSerialPort = port;
+    webSerialChannel = channel;
+    webSerialOpenSignature = sioSignature(config);
+    webSerialInputs = { cts: true, dcd: true };
+    webSerialWriter = port.writable ? port.writable.getWriter() : null;
+    webSerialReadTask = readWebSerial(port, channel);
+    sioAppliedModem = [null, null];
+    syncSioModemInputs();
+    updateWebSerialOutputs(config);
+    setSioConnection(`Connected to channel ${channel ? "B" : "A"}`);
+    setIoPanelVisible("sio", true);
+    updateSioUi();
+  } catch (error) {
+    if (port) {
+      try { await port.close(); } catch (closeError) { /* best effort */ }
+    }
+    webSerialPort = null;
+    webSerialChannel = -1;
+    webSerialWriter = null;
+    webSerialReadTask = null;
+    setSioConnection(`Connection failed: ${error.message}`, true);
+    updateSioUi();
+  }
+}
+
+function updateSioUi(now = performance.now()) {
+  const channel = selectedSioChannel();
+  const config = sioLineConfig(channel);
+  const mode = sioTransportEl.value;
+  sioConnectEl.hidden = mode !== "webserial";
+  sioConnectEl.textContent = webSerialPort ? "Disconnect" : "Connect";
+  sioChannelEl.disabled = !!webSerialPort;
+  sioTransportEl.disabled = !!webSerialPort;
+  sioSendEl.disabled = !config || !config.routed || mode === "webserial";
+  sioInputEl.disabled = sioSendEl.disabled;
+
+  if (!config) {
+    sioLineEl.textContent = "POWER OFF";
+  } else {
+    const name = channel ? "B" : "A";
+    const route = config.routed ? "RS-232C" : "MOUSE";
+    sioLineEl.textContent =
+      `${name} ${config.baud} baud RX${config.rxBits}/TX${config.txBits} ` +
+      `${parityLabel(config.parity)}${stopBitsLabel(config.stopHalfBits)} | ` +
+      `RX ${config.rxEnabled ? "on" : "off"} TX ${config.txEnabled ? "on" : "off"} | ` +
+      `DTR ${config.dtr ? 1 : 0} RTS ${config.rts ? 1 : 0} ` +
+      `BRK ${config.breakOn ? 1 : 0} | ${route}`;
+  }
+
+  if (webSerialPort && config) {
+    if (sioSignature(config) !== webSerialOpenSignature)
+      void disconnectWebSerial("Line settings changed; reconnect");
+    else {
+      updateWebSerialOutputs(config);
+      void pollWebSerialSignals(now);
+    }
+  }
+  syncSioModemInputs();
+  renderSioTerminal();
+}
+
+function sendSioInput() {
+  const channel = selectedSioChannel();
+  try {
+    const bytes = parseSioInput(sioInputEl.value);
+    if (sioAppendCrEl.checked) bytes.push(0x0D);
+    const accepted = injectSioBytes(channel, bytes);
+    if (accepted !== bytes.length)
+      setSioConnection(`Accepted ${accepted} of ${bytes.length} byte(s)`, true);
+    else setSioConnection(`Queued ${accepted} byte(s)`);
+    sioInputEl.value = "";
+  } catch (error) {
+    setSioConnection(error.message, true);
+  }
+}
+
+sioChannelEl.addEventListener("change", () => {
+  sioTerminalDirty = true;
+  sioAppliedModem = [null, null];
+  setSioConnection(sioTransportEl.value === "loopback" ?
+                   "Timed loopback ready" : "Virtual line ready");
+  updateSioUi();
+});
+sioTransportEl.addEventListener("change", () => {
+  sioAppliedModem = [null, null];
+  if (sioTransportEl.value === "terminal") setSioConnection("Virtual line ready");
+  else if (sioTransportEl.value === "loopback") setSioConnection("Timed loopback ready");
+  else if ("serial" in navigator) setSioConnection("Select a physical adapter");
+  else setSioConnection("Web Serial is unavailable in this browser", true);
+  updateSioUi();
+});
+sioConnectEl.addEventListener("click", () => void connectWebSerial());
+sioSendEl.addEventListener("click", sendSioInput);
+sioInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); sendSioInput(); }
+});
+sioClearEl.addEventListener("click", () => {
+  const channel = selectedSioChannel();
+  sioCapture[channel].length = 0;
+  sioCaptureDropped[channel] = 0;
+  sioTerminalDirty = true;
+  renderSioTerminal();
+});
+sioSaveEl.addEventListener("click", () => {
+  const channel = selectedSioChannel();
+  const blob = new Blob([Uint8Array.from(sioCapture[channel])],
+                        { type: "application/octet-stream" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `mz2500-sio-${channel ? "b" : "a"}.bin`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 0);
+});
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("disconnect", (event) => {
+    if (event.target === webSerialPort) void disconnectWebSerial("Adapter disconnected");
+  });
+}
+updateSioUi();
+
+// ---- built-in CMT data recorder -----------------------------------------
+// WAV is deliberately the only interchange format: the core consumes the
+// actual comparator waveform, so turbo/custom loaders retain their timing.
+const cmtStateEl = document.getElementById("cmt-state");
+const cmtProgressEl = document.getElementById("cmt-progress");
+const cmtLoadEl = document.getElementById("cmt-load");
+const cmtInsertEl = document.getElementById("cmt-insert");
+const cmtNewEl = document.getElementById("cmt-new");
+const cmtEjectEl = document.getElementById("cmt-eject");
+const cmtWpEl = document.getElementById("cmt-wp");
+const cmtSaveEl = document.getElementById("cmt-save");
+const cmtFileEl = document.getElementById("cmt-file");
+const cmtCommandEls = Array.from(document.querySelectorAll(".cmt-command"));
+const cmtDeckEl = document.getElementById("cmt-deck");
+const cmtMediaNameEl = document.getElementById("cmt-media-name");
+const cmtCounterEl = document.getElementById("cmt-counter");
+const cmtCounterResetEl = document.getElementById("cmt-counter-reset");
+const cmtMicEl = document.getElementById("cmt-mic-toggle");
+const cmtRecEl = document.getElementById("cmt-rec");
+const cmtLedEls = {
+  play: document.getElementById("cmt-led-play"),
+  ff: document.getElementById("cmt-led-ff"),
+  rew: document.getElementById("cmt-led-rew"),
+  rec: document.getElementById("cmt-led-rec"),
+};
+
+let cmtMedia = null; // { name, bytes, wp, inserted }
+let cmtSaveTimer = null;
+let cmtUiSignature = "";
+let cmtCounterZeroMs = 0;
+
+function formatTapeTime(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function formatTapeCounter(position, duration) {
+  if (duration <= 0) return "000";
+  const relative = Math.round((position - cmtCounterZeroMs) * 999 / duration);
+  const wrapped = ((relative % 1000) + 1000) % 1000;
+  return String(wrapped).padStart(3, "0");
+}
+
+function cmtSnapshot() {
+  if (!Module) return null;
+  const size = Module._emu_cmt_snapshot();
+  if (size <= 0) return null;
+  const ptr = Module._emu_cmt_data();
+  return Module.HEAPU8.slice(ptr, ptr + size);
+}
+
+function mountCmtMedia() {
+  if (!Module || !cmtMedia || !cmtMedia.bytes.length) return false;
+  const ptr = Module._malloc(cmtMedia.bytes.length);
+  Module.HEAPU8.set(cmtMedia.bytes, ptr);
+  const ok = Module._emu_cmt_insert_wav(ptr, cmtMedia.bytes.length) !== 0;
+  Module._free(ptr);
+  if (!ok) return false;
+  cmtMedia.inserted = true;
+  Module._emu_cmt_set_wp(cmtMedia.wp ? 1 : 0);
+  saveCmtToStore(cmtMedia);
+  refreshCmtUi();
+  return true;
+}
+
+function persistCmt() {
+  if (!Module || !cmtMedia) return;
+  const bytes = cmtSnapshot();
+  if (bytes) cmtMedia.bytes = bytes;
+  cmtMedia.wp = Module._emu_cmt_wp() !== 0;
+  cmtMedia.inserted = Module._emu_cmt_loaded() !== 0;
+  Module._emu_cmt_clear_dirty();
+  return saveCmtToStore(cmtMedia);
+}
+
+function scheduleCmtPersist() {
+  if (cmtSaveTimer) return;
+  cmtSaveTimer = setTimeout(() => {
+    cmtSaveTimer = null;
+    persistCmt();
+  }, 1000);
+}
+
+function flushCmtPersist() {
+  if (cmtSaveTimer) {
+    clearTimeout(cmtSaveTimer);
+    cmtSaveTimer = null;
+  }
+  return Promise.resolve(persistCmt());
+}
+
+function refreshCmtUi() {
+  const loaded = !!Module && Module._emu_cmt_loaded() !== 0;
+  const transport = loaded ? Module._emu_cmt_transport() : 0;
+  const position = Module ? Module._emu_cmt_position_ms() : 0;
+  const duration = Module ? Module._emu_cmt_duration_ms() : 0;
+  const wp = Module ? Module._emu_cmt_wp() !== 0 : !!(cmtMedia && cmtMedia.wp);
+  const recording = !!Module && Module._emu_cmt_recording() !== 0;
+
+  if (Module && cmtMedia && cmtMedia.inserted !== loaded) {
+    cmtMedia.inserted = loaded;
+    saveCmtToStore(cmtMedia);
+  }
+  const states = ["STOP", "PLAY", "FF", "REW"];
+  const name = cmtMedia ? cmtMedia.name : "NO IMAGE";
+  const state = !Module ? "POWER OFF" : loaded ? states[transport] : "EJECTED";
+  const signature = [state, name, position, duration, wp, recording, cmtCounterZeroMs].join("|");
+  if (signature !== cmtUiSignature) {
+    cmtStateEl.textContent = `${state} | ${formatTapeTime(position)} / ${formatTapeTime(duration)}`;
+    cmtMediaNameEl.textContent = cmtMedia ? name : "NO TAPE";
+    cmtCounterEl.textContent = formatTapeCounter(position, duration);
+    cmtProgressEl.max = Math.max(1, duration);
+    cmtProgressEl.value = Math.min(position, Math.max(1, duration));
+    cmtWpEl.setAttribute("aria-pressed", wp ? "true" : "false");
+    cmtDeckEl.classList.toggle("powered", !!Module);
+    cmtDeckEl.classList.toggle("loaded", loaded);
+    cmtDeckEl.classList.toggle("transport-play", loaded && transport === 1);
+    cmtDeckEl.classList.toggle("transport-ff", loaded && transport === 2);
+    cmtDeckEl.classList.toggle("transport-rew", loaded && transport === 3);
+    cmtLedEls.play.classList.toggle("on", loaded && transport === 1);
+    cmtLedEls.ff.classList.toggle("on", loaded && transport === 2);
+    cmtLedEls.rew.classList.toggle("on", loaded && transport === 3);
+    cmtLedEls.rec.classList.toggle("on", recording);
+    cmtRecEl.setAttribute("aria-pressed", recording ? "true" : "false");
+    cmtUiSignature = signature;
+  }
+  cmtInsertEl.disabled = !Module || !cmtMedia || loaded;
+  cmtEjectEl.disabled = !Module || !loaded;
+  cmtSaveEl.disabled = !cmtMedia;
+  for (const button of cmtCommandEls) {
+    button.disabled = !loaded;
+    button.classList.toggle("active", loaded && Number(button.dataset.command) === transport);
+  }
+}
+
+cmtLoadEl.addEventListener("click", () => cmtFileEl.click());
+cmtFileEl.addEventListener("change", async () => {
+  const file = cmtFileEl.files[0];
+  cmtFileEl.value = "";
+  if (!file) return;
+  const candidate = { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()),
+                      wp: true, inserted: true };
+  const previous = cmtMedia;
+  cmtMedia = candidate;
+  if (Module && !mountCmtMedia()) {
+    cmtMedia = previous;
+    statusEl.textContent = "CMT: UNSUPPORTED WAV";
+    return;
+  }
+  cmtCounterZeroMs = 0;
+  await saveCmtToStore(cmtMedia);
+  refreshCmtUi();
+});
+
+cmtInsertEl.addEventListener("click", () => {
+  if (!mountCmtMedia()) statusEl.textContent = "CMT: NO VALID IMAGE";
+});
+
+cmtNewEl.addEventListener("click", async () => {
+  if (!Module) {
+    statusEl.textContent = "POWER ON FIRST";
+    return;
+  }
+  await flushCmtPersist();
+  if (!Module._emu_cmt_create_blank(5 * 60)) {
+    statusEl.textContent = "CMT: CANNOT CREATE TAPE";
+    return;
+  }
+  cmtMedia = { name: "blank-tape.wav", bytes: cmtSnapshot(), wp: false, inserted: true };
+  cmtCounterZeroMs = 0;
+  await saveCmtToStore(cmtMedia);
+  refreshCmtUi();
+});
+
+cmtEjectEl.addEventListener("click", async () => {
+  await flushCmtPersist();
+  if (!Module) return;
+  Module._emu_cmt_eject();
+  if (cmtMedia) {
+    cmtMedia.inserted = false;
+    await saveCmtToStore(cmtMedia);
+  }
+  refreshCmtUi();
+});
+
+cmtWpEl.addEventListener("click", () => {
+  if (!cmtMedia) return;
+  cmtMedia.wp = !cmtMedia.wp;
+  if (Module) Module._emu_cmt_set_wp(cmtMedia.wp ? 1 : 0);
+  saveCmtToStore(cmtMedia);
+  refreshCmtUi();
+});
+
+for (const button of cmtCommandEls) {
+  button.addEventListener("click", () => {
+    if (Module) Module._emu_cmt_command(Number(button.dataset.command));
+    refreshCmtUi();
+  });
+}
+
+cmtCounterResetEl.addEventListener("click", () => {
+  cmtCounterZeroMs = Module ? Module._emu_cmt_position_ms() : 0;
+  cmtUiSignature = "";
+  refreshCmtUi();
+});
+
+cmtMicEl.addEventListener("click", () => {
+  statusEl.textContent = "CMT: ANALOG MICROPHONE TRACK NOT AVAILABLE";
+});
+
+cmtRecEl.addEventListener("click", () => {
+  statusEl.textContent = "CMT: ANALOG RECORD KEY NOT AVAILABLE";
+});
+
+cmtSaveEl.addEventListener("click", async () => {
+  await flushCmtPersist();
+  if (!cmtMedia) return;
+  const url = URL.createObjectURL(new Blob([cmtMedia.bytes], { type: "audio/wav" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = /\.wav$/i.test(cmtMedia.name) ? cmtMedia.name : `${cmtMedia.name}.wav`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+refreshCmtUi();
+
+// ---- MZ-1E30 SASI hard disk --------------------------------------------
+const sasiStateEl = document.getElementById("sasi-state");
+const sasiBlockEl = document.getElementById("sasi-block");
+const sasiTargetEl = document.getElementById("sasi-target");
+const sasiNewSizeEl = document.getElementById("sasi-new-size");
+const sasiLoadEl = document.getElementById("sasi-load");
+const sasiInsertEl = document.getElementById("sasi-insert");
+const sasiNewEl = document.getElementById("sasi-new");
+const sasiWpEl = document.getElementById("sasi-wp");
+const sasiSaveEl = document.getElementById("sasi-save");
+const sasiEjectEl = document.getElementById("sasi-eject");
+const sasiFileEl = document.getElementById("sasi-file");
+
+let sasiMedia = null; // { name, bytes, blockSize, wp, inserted, target }
+let sasiSaveTimer = null;
+let sasiUiSignature = "";
+sasiBlockEl.value = localStorage.getItem("mzw_sasi_block") || "0";
+sasiTargetEl.value = localStorage.getItem("mzw_sasi_target") || "0";
+
+function sasiSnapshot() {
+  if (!Module) return new Uint8Array();
+  const size = Module._emu_sasi_snapshot();
+  if (size <= 0) return new Uint8Array();
+  const ptr = Module._emu_sasi_data();
+  return Module.HEAPU8.slice(ptr, ptr + size);
+}
+
+function mountSasiMedia() {
+  if (!Module || !sasiMedia || !sasiMedia.bytes.length) return false;
+  const ptr = Module._malloc(sasiMedia.bytes.length);
+  Module.HEAPU8.set(sasiMedia.bytes, ptr);
+  const requestedBlock = Number(sasiMedia.blockSize || 0);
+  const ok = Module._emu_sasi_insert(ptr, sasiMedia.bytes.length, requestedBlock) !== 0;
+  Module._free(ptr);
+  if (!ok) return false;
+  sasiMedia.blockSize = Module._emu_sasi_block_size();
+  sasiMedia.inserted = true;
+  Module._emu_sasi_set_wp(sasiMedia.wp ? 1 : 0);
+  Module._emu_sasi_set_target(Number(sasiMedia.target || 0));
+  Module._emu_sasi_clear_dirty();
+  saveSasiToStore(sasiMedia);
+  refreshSasiUi();
+  return true;
+}
+
+function persistSasi() {
+  if (!Module || !sasiMedia) return;
+  if (Module._emu_sasi_loaded()) {
+    const bytes = sasiSnapshot();
+    if (bytes.length) sasiMedia.bytes = bytes;
+    sasiMedia.blockSize = Module._emu_sasi_block_size();
+    sasiMedia.wp = Module._emu_sasi_wp() !== 0;
+    sasiMedia.target = Module._emu_sasi_target();
+    sasiMedia.inserted = true;
+  }
+  Module._emu_sasi_clear_dirty();
+  return saveSasiToStore(sasiMedia);
+}
+
+function scheduleSasiPersist() {
+  if (sasiSaveTimer) return;
+  sasiSaveTimer = setTimeout(() => {
+    sasiSaveTimer = null;
+    persistSasi();
+  }, 1000);
+}
+
+function flushSasiPersist() {
+  if (sasiSaveTimer) {
+    clearTimeout(sasiSaveTimer);
+    sasiSaveTimer = null;
+  }
+  return Promise.resolve(persistSasi());
+}
+
+function refreshSasiUi() {
+  const loaded = !!Module && Module._emu_sasi_loaded() !== 0;
+  const block = loaded ? Module._emu_sasi_block_size() : (sasiMedia && sasiMedia.blockSize) || 0;
+  const wp = loaded ? Module._emu_sasi_wp() !== 0 : !!(sasiMedia && sasiMedia.wp);
+  const target = loaded ? Module._emu_sasi_target() : Number(sasiTargetEl.value);
+  const phaseNames = ["BUS FREE", "COMMAND", "DATA OUT", "DATA IN", "STATUS", "MESSAGE IN"];
+  const phase = loaded ? phaseNames[Module._emu_sasi_phase()] || "UNKNOWN" : "BUS FREE";
+  const name = sasiMedia ? sasiMedia.name : "NO IMAGE";
+  const bytes = loaded ? Module._emu_sasi_size() : (sasiMedia ? sasiMedia.bytes.length : 0);
+  const signature = `${loaded}:${name}:${bytes}:${block}:${wp}:${target}:${phase}`;
+  if (signature !== sasiUiSignature) {
+    sasiStateEl.textContent = Module
+      ? `${loaded ? "INSERTED" : "EJECTED"} | ${name} | ${(bytes / 1048576).toFixed(2)} MiB | ` +
+        `${block || "?"} B/block | ID ${target} | ${phase}`
+      : "POWER OFF";
+    sasiWpEl.setAttribute("aria-pressed", wp ? "true" : "false");
+    sasiUiSignature = signature;
+  }
+  sasiInsertEl.disabled = !Module || !sasiMedia || loaded;
+  sasiEjectEl.disabled = !loaded;
+  sasiWpEl.disabled = !sasiMedia;
+  sasiSaveEl.disabled = !sasiMedia || !sasiMedia.bytes.length;
+}
+
+sasiLoadEl.addEventListener("click", () => sasiFileEl.click());
+sasiFileEl.addEventListener("change", async () => {
+  const file = sasiFileEl.files[0];
+  sasiFileEl.value = "";
+  if (!file) return;
+  await flushSasiPersist();
+  const candidate = {
+    name: file.name,
+    bytes: new Uint8Array(await file.arrayBuffer()),
+    blockSize: Number(sasiBlockEl.value),
+    wp: false,
+    inserted: true,
+    target: Number(sasiTargetEl.value),
+  };
+  const previous = sasiMedia;
+  sasiMedia = candidate;
+  if (Module && !mountSasiMedia()) {
+    sasiMedia = previous;
+    statusEl.textContent = "SASI: IMAGE SIZE/BLOCK SIZE MISMATCH";
+    return;
+  }
+  await saveSasiToStore(sasiMedia);
+  refreshSasiUi();
+});
+
+sasiInsertEl.addEventListener("click", () => {
+  if (!mountSasiMedia()) statusEl.textContent = "SASI: NO VALID IMAGE";
+});
+
+sasiNewEl.addEventListener("click", async () => {
+  if (!Module) {
+    statusEl.textContent = "POWER ON FIRST";
+    return;
+  }
+  await flushSasiPersist();
+  const [sizeText, blockText] = sasiNewSizeEl.value.split(":");
+  const size = Number(sizeText), blockSize = Number(blockText);
+  if (!Module._emu_sasi_create_blank(size, blockSize)) {
+    statusEl.textContent = "SASI: CANNOT CREATE IMAGE";
+    return;
+  }
+  const isMZ = size === 22437888 && blockSize === 1024;
+  sasiMedia = {
+    name: isMZ ? "mz1f23.hdf" : `blank-${Math.round(size / 1000000)}mb.hdf`,
+    bytes: sasiSnapshot(), blockSize, wp: false, inserted: true,
+    target: Number(sasiTargetEl.value),
+  };
+  Module._emu_sasi_set_target(sasiMedia.target);
+  Module._emu_sasi_clear_dirty();
+  await saveSasiToStore(sasiMedia);
+  refreshSasiUi();
+});
+
+sasiEjectEl.addEventListener("click", async () => {
+  await flushSasiPersist();
+  if (!Module) return;
+  Module._emu_sasi_eject();
+  if (sasiMedia) {
+    sasiMedia.inserted = false;
+    await saveSasiToStore(sasiMedia);
+  }
+  refreshSasiUi();
+});
+
+sasiWpEl.addEventListener("click", () => {
+  if (!sasiMedia) return;
+  sasiMedia.wp = !sasiMedia.wp;
+  if (Module && Module._emu_sasi_loaded())
+    Module._emu_sasi_set_wp(sasiMedia.wp ? 1 : 0);
+  saveSasiToStore(sasiMedia);
+  refreshSasiUi();
+});
+
+sasiSaveEl.addEventListener("click", async () => {
+  await flushSasiPersist();
+  if (!sasiMedia || !sasiMedia.bytes.length) return;
+  const url = URL.createObjectURL(new Blob([sasiMedia.bytes],
+    { type: "application/octet-stream" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = /\.(hdf|hds|hdi|nhd|img|bin)$/i.test(sasiMedia.name)
+    ? sasiMedia.name : `${sasiMedia.name}.hdf`;
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+sasiBlockEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_sasi_block", sasiBlockEl.value);
+});
+sasiTargetEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_sasi_target", sasiTargetEl.value);
+  if (sasiMedia) sasiMedia.target = Number(sasiTargetEl.value);
+  if (Module) Module._emu_sasi_set_target(Number(sasiTargetEl.value));
+  if (sasiMedia) saveSasiToStore(sasiMedia);
+  refreshSasiUi();
+});
+
+refreshSasiUi();
+
+// ---- parallel printer capture ------------------------------------------
+const printerOnlineEl = document.getElementById("printer-online");
+const printerStateEl = document.getElementById("printer-state");
+const printerPreviewEl = document.getElementById("printer-preview");
+const printerSaveEl = document.getElementById("printer-save");
+const printerClearEl = document.getElementById("printer-clear");
+
+let printerBytes = new Uint8Array();
+let printerUiSignature = "";
+printerOnlineEl.checked = localStorage.getItem("mzw_printer_online") !== "0";
+
+function printerSnapshot() {
+  if (!Module) return new Uint8Array();
+  const size = Module._emu_printer_snapshot();
+  if (size <= 0) return new Uint8Array();
+  const ptr = Module._emu_printer_data();
+  return Module.HEAPU8.slice(ptr, ptr + size);
+}
+
+function formatPrinterPreview(bytes) {
+  const start = Math.max(0, bytes.length - 4096);
+  let out = start ? `[${start} earlier byte(s) hidden]\n` : "";
+  for (let i = start; i < bytes.length; i++) {
+    const value = bytes[i];
+    if (value === 0x0A) out += "\n";
+    else if (value === 0x0D) out += "\\r";
+    else if (value === 0x09) out += "\t";
+    else if (value >= 0x20 && value <= 0x7E) out += String.fromCharCode(value);
+    else out += `\\x${value.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+function applyPrinterHostSettings() {
+  if (Module) Module._emu_printer_set_online(printerOnlineEl.checked ? 1 : 0);
+}
+
+function refreshPrinterUi(force = false) {
+  if (!Module) {
+    printerStateEl.textContent = "POWER OFF";
+    printerSaveEl.disabled = true;
+    printerClearEl.disabled = true;
+    return;
+  }
+  if (force || Module._emu_printer_dirty()) {
+    const previousLength = printerBytes.length;
+    printerBytes = printerSnapshot();
+    Module._emu_printer_clear_dirty();
+    printerPreviewEl.value = formatPrinterPreview(printerBytes);
+    printerPreviewEl.scrollTop = printerPreviewEl.scrollHeight;
+    if (printerBytes.length > previousLength) setIoPanelVisible("printer", true);
+  }
+  const online = Module._emu_printer_online() !== 0;
+  const dropped = Module._emu_printer_dropped();
+  const signature = `${online}:${printerBytes.length}:${dropped}`;
+  if (signature !== printerUiSignature) {
+    printerStateEl.textContent =
+      `${online ? "ONLINE" : "OFFLINE"} | ${printerBytes.length} byte(s)` +
+      (dropped ? ` | ${dropped} dropped` : "");
+    printerUiSignature = signature;
+  }
+  printerSaveEl.disabled = printerBytes.length === 0;
+  printerClearEl.disabled = printerBytes.length === 0;
+}
+
+printerOnlineEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_printer_online", printerOnlineEl.checked ? "1" : "0");
+  applyPrinterHostSettings();
+  refreshPrinterUi();
+});
+
+printerSaveEl.addEventListener("click", () => {
+  printerBytes = printerSnapshot();
+  if (!printerBytes.length) return;
+  const url = URL.createObjectURL(new Blob([printerBytes],
+    { type: "application/octet-stream" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "mz2500-printer.prn";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+printerClearEl.addEventListener("click", () => {
+  if (Module) Module._emu_printer_clear_output();
+  printerBytes = new Uint8Array();
+  printerPreviewEl.value = "";
+  printerUiSignature = "";
+  refreshPrinterUi();
+});
+
+refreshPrinterUi();
+
+// ---- MZ-1E35 raw GPIO and analogue input --------------------------------
+const adpcmRamEl = document.getElementById("adpcm-ram");
+const adpcmGainEl = document.getElementById("adpcm-gain");
+const adpcmGainValueEl = document.getElementById("adpcm-gain-value");
+const adpcmInputEl = document.getElementById("adpcm-input");
+const adpcmInputStateEl = document.getElementById("adpcm-input-state");
+const adpcmStateEl = document.getElementById("adpcm-state");
+const adpcmGpioEls = Array.from(document.querySelectorAll("#adpcm-gpio [data-gpio]"));
+
+let adpcmInputStream = null;
+let adpcmInputSource = null;
+let adpcmUiSignature = "";
+
+adpcmRamEl.value = localStorage.getItem("mzw_adpcm_ram") || "32768";
+adpcmGainEl.value = localStorage.getItem("mzw_adpcm_gain") || "100";
+let savedGpio = parseInt(localStorage.getItem("mzw_adpcm_gpio") || "15", 10) & 0x0F;
+for (const input of adpcmGpioEls)
+  input.checked = (savedGpio & (1 << Number(input.dataset.gpio))) !== 0;
+
+function adpcmGpioInputMask() {
+  let mask = 0;
+  for (const input of adpcmGpioEls)
+    if (input.checked) mask |= 1 << Number(input.dataset.gpio);
+  return mask;
+}
+
+function applyAdpcmHostSettings() {
+  const gain = Number(adpcmGainEl.value) / 100;
+  adpcmGainValueEl.textContent = gain.toFixed(2);
+  if (!Module) return;
+  Module._emu_adpcm_set_ram_size(Number(adpcmRamEl.value));
+  Module._emu_adpcm_set_gain(gain);
+  Module._emu_adpcm_set_gpio_inputs(adpcmGpioInputMask());
+}
+
+function refreshAdpcmUi() {
+  if (!Module) {
+    adpcmStateEl.textContent = "POWER OFF";
+    return;
+  }
+  const direction = Module._emu_adpcm_gpio_direction() & 0x0F;
+  const outputs = Module._emu_adpcm_gpio_outputs() & 0x0F;
+  const pins = Module._emu_adpcm_gpio_pins() & 0x0F;
+  const adc = Module._emu_adpcm_adc_enabled() !== 0;
+  const ram = Module._emu_adpcm_ram_size() / 1024;
+  const signature = [direction, outputs, pins, adc, ram].join("|");
+  if (signature !== adpcmUiSignature) {
+    const hex = (value) => value.toString(16).toUpperCase();
+    adpcmStateEl.textContent =
+      `GPIO DIR=${hex(direction)} OUT=${hex(outputs)} PIN=${hex(pins)} | ` +
+      `ADC ${adc ? "running" : "stopped"} | RAM ${ram} KB`;
+    for (const input of adpcmGpioEls)
+      input.disabled = (direction & (1 << Number(input.dataset.gpio))) !== 0;
+    adpcmUiSignature = signature;
+  }
+}
+
+function queueAdpcmInput(samples, rate) {
+  if (!Module || !samples || !samples.length) return;
+  const ptr = Module._malloc(samples.length * 4);
+  Module.HEAPF32.set(samples, ptr >> 2);
+  Module._emu_adpcm_input_samples(ptr, samples.length, rate);
+  Module._free(ptr);
+}
+
+function stopAdpcmInput() {
+  if (workletNode) workletNode.port.postMessage({ capture: false });
+  if (adpcmInputSource) adpcmInputSource.disconnect();
+  if (adpcmInputStream)
+    for (const track of adpcmInputStream.getTracks()) track.stop();
+  adpcmInputSource = null;
+  adpcmInputStream = null;
+  if (Module) Module._emu_adpcm_clear_input();
+  adpcmInputEl.setAttribute("aria-pressed", "false");
+  adpcmInputEl.textContent = "Start audio input";
+  adpcmInputStateEl.textContent = "Input stopped";
+}
+
+async function toggleAdpcmInput() {
+  if (adpcmInputStream) {
+    stopAdpcmInput();
+    return;
+  }
+  if (!Module || !audioCtx || !workletNode) {
+    adpcmInputStateEl.textContent = "Power on first";
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    adpcmInputStateEl.textContent = "Audio capture is unavailable";
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    }});
+    Module._emu_adpcm_clear_input();
+    adpcmInputStream = stream;
+    adpcmInputSource = audioCtx.createMediaStreamSource(stream);
+    adpcmInputSource.connect(workletNode);
+    workletNode.port.postMessage({ capture: true });
+    adpcmInputEl.setAttribute("aria-pressed", "true");
+    adpcmInputEl.textContent = "Stop audio input";
+    adpcmInputStateEl.textContent = "Browser audio device connected";
+  } catch (error) {
+    stopAdpcmInput();
+    adpcmInputStateEl.textContent = `Input error: ${error && error.name ? error.name : "unknown"}`;
+  }
+}
+
+adpcmRamEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_adpcm_ram", adpcmRamEl.value);
+  applyAdpcmHostSettings();
+});
+adpcmGainEl.addEventListener("input", () => {
+  localStorage.setItem("mzw_adpcm_gain", adpcmGainEl.value);
+  applyAdpcmHostSettings();
+});
+for (const input of adpcmGpioEls) {
+  input.addEventListener("change", () => {
+    localStorage.setItem("mzw_adpcm_gpio", String(adpcmGpioInputMask()));
+    applyAdpcmHostSettings();
+  });
+}
+adpcmInputEl.addEventListener("click", toggleAdpcmInput);
+applyAdpcmHostSettings();
+
 // ---- disks ----------------------------------------------------------------
 // A .d88 file may hold several concatenated volumes (multi-disk releases).
+const d88TitleDecoder = new TextDecoder("shift_jis");
+
 function d88Volumes(bytes) {
   const volumes = [];
   let off = 0;
@@ -146,13 +1317,12 @@ function d88Volumes(bytes) {
     const size = bytes[off + 0x1c] | (bytes[off + 0x1d] << 8) |
                  (bytes[off + 0x1e] << 16) | (bytes[off + 0x1f] << 24);
     if (size < 0x2b0 || off + size > bytes.length) break;
-    let title = "";
-    for (let i = 0; i < 17; i++) {
-      const c = bytes[off + i];
-      if (c >= 0x20 && c < 0x7f) title += String.fromCharCode(c);
-      else if (c === 0) break;
-    }
-    volumes.push({ title: title.trim(), bytes: bytes.slice(off, off + size) });
+    const rawTitle = bytes.subarray(off, off + 17);
+    const terminator = rawTitle.indexOf(0);
+    const titleBytes = terminator < 0 ? rawTitle : rawTitle.subarray(0, terminator);
+    const title = d88TitleDecoder.decode(titleBytes)
+      .replace(/[\u0000-\u001f\u007f]/g, "").trim();
+    volumes.push({ title, bytes: bytes.slice(off, off + size) });
     off += size;
   }
   return volumes;
@@ -197,17 +1367,57 @@ const drives = [null, null];
 // startup has already opened it.
 let dbConn = null;
 let dbPromise = null;
+let dbUnavailable = false;
 function idb() {
+  if (dbUnavailable) return Promise.reject(new Error("IndexedDB unavailable"));
   if (!dbPromise) {
     dbPromise = new Promise((res, rej) => {
-      const r = indexedDB.open("mz2500w", 2);
+      const r = indexedDB.open("mz2500w", 4);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        dbUnavailable = true;
+        dbPromise = null;
+        rej(new Error("IndexedDB open timed out"));
+      }, 2000);
       r.onupgradeneeded = () => {
         const db = r.result;
         if (!db.objectStoreNames.contains("drives")) db.createObjectStore("drives");
         if (!db.objectStoreNames.contains("roms")) db.createObjectStore("roms");
+        if (!db.objectStoreNames.contains("cmt")) db.createObjectStore("cmt");
+        if (!db.objectStoreNames.contains("sasi")) db.createObjectStore("sasi");
       };
-      r.onsuccess = () => { dbConn = r.result; res(r.result); };
-      r.onerror = () => { dbPromise = null; rej(r.error); };
+      r.onsuccess = () => {
+        if (settled) {
+          r.result.close();
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        dbConn = r.result;
+        res(r.result);
+      };
+      r.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        dbUnavailable = true;
+        dbPromise = null;
+        rej(r.error);
+      };
+      // A tab left open on an older schema can block the upgrade request.
+      // Persistence is optional, so never let that stall POWER ON or leave
+      // the ROM panel empty; a later retry can connect after the old tab is
+      // closed or reloaded.
+      r.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        dbUnavailable = true;
+        dbPromise = null;
+        rej(new Error("IndexedDB upgrade is blocked by another tab"));
+      };
     });
   }
   return dbPromise;
@@ -255,12 +1465,84 @@ async function clearDriveStore(drive) {
   } catch (e) { /* ignore */ }
 }
 
+function putCmtRecordSync(media) {
+  if (!dbConn || !media) return false;
+  try {
+    dbConn.transaction("cmt", "readwrite").objectStore("cmt").put({
+      name: media.name,
+      buffer: media.bytes.slice().buffer,
+      wp: !!media.wp,
+      inserted: !!media.inserted,
+    }, "tape");
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function saveCmtToStore(media) {
+  if (!media || !media.bytes) return;
+  if (putCmtRecordSync(media)) return;
+  try {
+    await idb();
+    putCmtRecordSync(media);
+  } catch (e) { /* private mode etc.: persistence is best-effort */ }
+}
+
+async function loadCmtFromStore() {
+  try {
+    const db = await idb();
+    return await new Promise((res) => {
+      const rq = db.transaction("cmt").objectStore("cmt").get("tape");
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror = () => res(null);
+    });
+  } catch (e) { return null; }
+}
+
+function putSasiRecordSync(media) {
+  if (!dbConn || !media) return false;
+  try {
+    dbConn.transaction("sasi", "readwrite").objectStore("sasi").put({
+      name: media.name,
+      buffer: media.bytes.slice().buffer,
+      blockSize: Number(media.blockSize || 0),
+      wp: !!media.wp,
+      inserted: !!media.inserted,
+      target: Number(media.target || 0),
+    }, "disk");
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function saveSasiToStore(media) {
+  if (!media || !media.bytes) return;
+  if (putSasiRecordSync(media)) return;
+  try {
+    await idb();
+    putSasiRecordSync(media);
+  } catch (e) { /* best-effort */ }
+}
+
+async function loadSasiFromStore() {
+  try {
+    const db = await idb();
+    return await new Promise((res) => {
+      const rq = db.transaction("sasi").objectStore("sasi").get("disk");
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror = () => res(null);
+    });
+  } catch (e) { return null; }
+}
+
 // ---- user ROM slots (browser-local only; nothing is ever uploaded) -------
 const ROM_KINDS = [
-  { key: "ipl", kind: 0, label: "ipl.rom", note: "32KB / 実IPLブート用" },
-  { key: "cg", kind: 1, label: "cg.rom", note: "2KB / 保管のみ（未結線）" },
+  { key: "ipl", kind: 0, label: "ipl.rom", note: "32KB / MZ-2500 IPL" },
   { key: "kanji", kind: 2, label: "kanji.rom", note: "256KB / バンク39h窓" },
   { key: "dict", kind: 3, label: "dict.rom", note: "256KB / バンク3Ah窓" },
+  { key: "sasi", kind: 4, label: "sasi.rom", note: "MZ-1E30 BIOS / A8h-A9h" },
 ];
 async function saveRomToStore(key, name, bytes) {
   try {
@@ -305,6 +1587,7 @@ const HW_OPTIONS = [
   { id: "hw-mz1m10", kind: 2, key: "mzw_hw_mz1m10" },
   { id: "hw-adpcm", kind: 3, key: "mzw_hw_adpcm" },
   { id: "hw-emm", kind: 4, key: "mzw_hw_emm" },
+  { id: "hw-sasi", kind: 5, key: "mzw_hw_sasi" },
 ];
 function applyHwOptionsToMachine() {
   if (!Module) return;
@@ -317,11 +1600,19 @@ for (const o of HW_OPTIONS) {
   el.checked = localStorage.getItem(o.key) !== "0"; // default: installed
   el.addEventListener("change", () => {
     localStorage.setItem(o.key, el.checked ? "1" : "0");
-    applyHwOptionsToMachine(); // RAM/GRAM changes settle at the next RESET
+    applyHwOptionsToMachine(); // RAM/GRAM changes settle at the next IPL
   });
 }
 
 const realIplEl = document.getElementById("real-ipl-mode");
+const bootModeEl = document.getElementById("boot-mode");
+bootModeEl.value = localStorage.getItem("mzw_boot_mode") || "0";
+bootModeEl.addEventListener("change", () => {
+  localStorage.setItem("mzw_boot_mode", bootModeEl.value);
+  if (Module) {
+    statusEl.textContent = "BOOT MODE CHANGED - PRESS IPL";
+  }
+});
 realIplEl.checked = localStorage.getItem("mzw_real_ipl") === "1";
 realIplEl.addEventListener("change", () => {
   localStorage.setItem("mzw_real_ipl", realIplEl.checked ? "1" : "0");
@@ -373,19 +1664,22 @@ refreshRomSlots();
 function refreshDriveUI(drive) {
   const d = drives[drive];
   if (!d) {
-    dnameEls[drive].textContent = "(empty)";
+    diskFilenameEls[drive].textContent = "NO DISK";
+    diskTitleEls[drive].textContent = "—";
     volEls[drive].hidden = true;
     return;
   }
   const multi = d.volumes.length > 1;
-  dnameEls[drive].textContent = multi ? d.name : (d.volumes[0].title || d.name);
+  const volume = d.volumes[clampVolumeIndex(d.current, d.volumes.length)];
+  diskFilenameEls[drive].textContent = d.name || "UNTITLED.D88";
+  diskTitleEls[drive].textContent = volume.title || "UNTITLED";
   volEls[drive].hidden = !multi;
   if (multi) {
     volEls[drive].innerHTML = "";
     d.volumes.forEach((v, i) => {
       const o = document.createElement("option");
       o.value = i;
-      o.textContent = `${i + 1}: ${v.title || "disk " + (i + 1)}`;
+      o.textContent = `${i + 1}: ${v.title || "UNTITLED"}`;
       volEls[drive].appendChild(o);
     });
     volEls[drive].value = d.current;
@@ -416,7 +1710,7 @@ async function insertFile(drive, name, bytes, opts) {
   // before this drive record is replaced - persistDisk() resolves what to
   // save (and under what name) through drives[drive], so a pending flush has
   // to land while that still points at the disk actually sitting in the
-  // core. Same ordering bug as bootFromFile()/coldBoot() (see finding 1):
+  // core. Same ordering bug as bootFromFile()/iplBoot() (see finding 1):
   // reassigning first would let the flush snapshot the CORE's still-old
   // bytes into the NEW disk's record and name.
   await flushDiskPersist(drive);
@@ -595,10 +1889,16 @@ function checkRealIplStall() {
         `RUNNING (REAL IPL) - 待機ループ検出 PC=${j.cpu.pc.toString(16).toUpperCase()}h`;
       return false;
     }
+    if (Number(bootModeEl.value) !== 0) {
+      stopIplWatchdog();
+      statusEl.textContent =
+        `LEGACY IPL STOPPED AT PC=${j.cpu.pc.toString(16).toUpperCase()}h`;
+      return false;
+    }
     stopIplWatchdog();
     realIplEl.checked = false;
     localStorage.setItem("mzw_real_ipl", "0");
-    coldBoot();
+    iplBoot();
     statusEl.textContent =
       `IPL停止検出 (PC=${j.cpu.pc.toString(16).toUpperCase()}h) → ダミーIPLで再起動しました`;
     return true;
@@ -616,7 +1916,7 @@ function startIplWatchdog() {
   iplWatchTimer = setInterval(checkRealIplStall, 1000);
 }
 
-async function coldBoot() {
+async function iplBoot() {
   if (!Module) return;
   // Land any write still sitting in the persist debounce BEFORE reloading -
   // pushVolume() -> _emu_insert_disk -> D88Disk::load() clears the core's
@@ -643,7 +1943,15 @@ async function coldBoot() {
     }
     Module._emu_disk_clear_dirty(drive);
   }
-  const wantRealIpl = realIplEl.checked && Module._emu_has_ipl();
+  const requestedBootMode = Number(bootModeEl.value);
+  Module._emu_set_boot_mode(requestedBootMode);
+  const hasIpl = Module._emu_has_ipl() !== 0;
+  const hasKanji = Module._emu_has_kanji() !== 0;
+  if (requestedBootMode !== 0 && (!hasIpl || !hasKanji)) {
+    statusEl.textContent = "LEGACY MODE REQUIRES MZ-2500 IPL.ROM AND KANJI.ROM";
+    return;
+  }
+  const wantRealIpl = hasIpl && (realIplEl.checked || requestedBootMode !== 0);
   if (!drives[0] && !wantRealIpl) return;
   if (drives[0]) pushVolume(0);
   if (drives[1]) pushVolume(1);
@@ -653,6 +1961,9 @@ async function coldBoot() {
     statusEl.textContent = "NOT A BOOTABLE DISK";
     return;
   }
+  applyAdpcmHostSettings();
+  sioAppliedModem = [null, null];
+  syncSioModemInputs();
   if (wantRealIpl) {
     statusEl.textContent = "RUNNING (REAL IPL)";
     startIplWatchdog();
@@ -671,7 +1982,7 @@ async function coldBoot() {
 // canvas drop / initial load: mount into FD1 (volume 2 goes to FD2) and boot
 //
 // Finding 1: this used to assign drives[0]/drives[1] for the INCOMING disk
-// and only then call coldBoot(), which flushes any pending persist. But
+// and only then call iplBoot(), which flushes any pending persist. But
 // persistDisk() resolves both "which bytes" (core snapshot) and "which
 // record to save them under" (drives[n].name/volumes) - the core snapshot
 // side is only correct while the core still holds the OUTGOING disk, and the
@@ -697,7 +2008,7 @@ async function bootFromFile(name, bytes, opts) {
     saveDriveToStore(0, name, bytes, 0);
     if (volumes.length > 1) saveDriveToStore(1, name, bytes, 1);
   }
-  await coldBoot();
+  await iplBoot();
 }
 
 async function powerOn() {
@@ -706,10 +2017,18 @@ async function powerOn() {
 
   const v = encodeURIComponent(window.BUILD_ID || "dev");
   audioCtx = new AudioContext();
+  statusEl.textContent = "LOADING AUDIO...";
   await audioCtx.audioWorklet.addModule("audio-worklet.js?v=" + v);
   workletNode = new AudioWorkletNode(audioCtx, "mz-audio", { outputChannelCount: [2] });
-  workletNode.connect(audioCtx.destination);
+  masterGainNode = audioCtx.createGain();
+  masterGainNode.gain.value = Number(masterVolumeEl.value);
+  workletNode.connect(masterGainNode);
+  masterGainNode.connect(audioCtx.destination);
   workletNode.port.onmessage = (e) => {
+    if (e.data.input) {
+      queueAdpcmInput(e.data.input, e.data.rate || audioCtx.sampleRate);
+      return;
+    }
     underruns = e.data.underruns;
     dropped = e.data.dropped;
     lastReportedQueued = e.data.queued;
@@ -717,14 +2036,58 @@ async function powerOn() {
     // underrun silence-fill and any counter drift)
     produced = (audioCtx.currentTime - audioT0) * audioCtx.sampleRate + e.data.queued;
   };
-  await audioCtx.resume();
+  // A background Chrome tab may keep the context suspended and leave the
+  // resume promise pending even though this function was entered from a
+  // click. Audio can join later; machine startup must not wait forever.
+  audioCtx.resume().catch(() => {});
 
   // core stderr = diagnostics (unimplemented-port notes etc.), not errors;
   // keep them out of the browser's error channel
+  statusEl.textContent = "LOADING CORE...";
   Module = await createMZ2500({ printErr: (t) => console.log("[core]", t) });
   Module._emu_init(audioCtx.sampleRate);
+  Module._emu_set_boot_mode(Number(bootModeEl.value));
+  sioAppliedModem = [null, null];
+  syncSioModemInputs();
+  updateSioUi();
   applyHwOptionsToMachine();
+  applyAdpcmHostSettings();
+  applyPrinterHostSettings();
+  refreshPrinterUi(true);
+  statusEl.textContent = "RESTORING MEDIA...";
   await applyRomsToMachine();
+  if (!cmtMedia) {
+    const savedCmt = await loadCmtFromStore();
+    if (savedCmt) {
+      cmtMedia = {
+        name: savedCmt.name || "tape.wav",
+        bytes: new Uint8Array(savedCmt.buffer),
+        wp: !!savedCmt.wp,
+        inserted: savedCmt.inserted !== false,
+      };
+    }
+  }
+  if (cmtMedia && cmtMedia.inserted && !mountCmtMedia())
+    statusEl.textContent = "CMT: STORED WAV IS INVALID";
+  refreshCmtUi();
+  if (!sasiMedia) {
+    const savedSasi = await loadSasiFromStore();
+    if (savedSasi) {
+      sasiMedia = {
+        name: savedSasi.name || "disk.hdf",
+        bytes: new Uint8Array(savedSasi.buffer),
+        blockSize: Number(savedSasi.blockSize || 0),
+        wp: !!savedSasi.wp,
+        inserted: savedSasi.inserted !== false,
+        target: Number(savedSasi.target || 0),
+      };
+      sasiTargetEl.value = String(sasiMedia.target);
+    }
+  }
+  Module._emu_sasi_set_target(Number(sasiTargetEl.value));
+  if (sasiMedia && sasiMedia.inserted && !mountSasiMedia())
+    statusEl.textContent = "SASI: STORED IMAGE IS INVALID";
+  refreshSasiUi();
 
   // restore disks saved in this browser (IndexedDB); FD1 boots in place of
   // the bundled demo, FD2 is remounted alongside. Disks chosen while the
@@ -744,7 +2107,7 @@ async function powerOn() {
       drives[0] = { name: saved0.name, volumes, current: clampVolumeIndex(saved0.current, volumes.length) };
   }
   if (drives[0]) {
-    coldBoot();
+    iplBoot();
     return;
   }
 
@@ -789,6 +2152,7 @@ function tick(now) {
     const consumed = (audioCtx.currentTime - audioT0) * rate;
     if (produced - consumed >= target) break;
     Module._emu_run_frame();
+    pumpSio();
     produced += pumpAudio();
     steps++;
   }
@@ -802,9 +2166,16 @@ function tick(now) {
   for (const drive of [0, 1]) {
     if (Module._emu_disk_dirty(drive)) scheduleDiskPersist(drive);
   }
+  if (Module._emu_cmt_dirty()) scheduleCmtPersist();
+  if (Module._emu_sasi_dirty()) scheduleSasiPersist();
   const lamps = Module._emu_fdd_lamps();
   lampEls[0].classList.toggle("on", (lamps & 1) !== 0);
   lampEls[1].classList.toggle("on", (lamps & 2) !== 0);
+  updateSioUi(now);
+  refreshCmtUi();
+  refreshAdpcmUi();
+  refreshPrinterUi();
+  refreshSasiUi();
 
   if (now - fpsWindowStart > 1000) {
     const bufMs = (lastReportedQueued / rate * 1000) | 0;
@@ -1020,8 +2391,11 @@ function pollGamepad() {
 function flushAllDiskPersists() {
   flushDiskPersist(0);
   flushDiskPersist(1);
+  flushCmtPersist();
+  flushSasiPersist();
 }
 window.addEventListener("pagehide", flushAllDiskPersists);
+window.addEventListener("pagehide", stopAdpcmInput);
 
 // ---- pause when hidden ----------------------------------------------------
 document.addEventListener("visibilitychange", () => {
@@ -1086,15 +2460,15 @@ for (const drive of [0, 1]) {
     if (Module) Module._emu_disk_clear_dirty(drive);
     clearDriveStore(drive);
     // Bring the UI (name, volume selector, WP indicator) to the same
-    // "(empty)" state used for a drive that was never loaded. The core's
+    // no-disk state used for a drive that was never loaded. The core's
     // FDC still has no "eject" entry point to tell it the media is gone
     // (only insert/snapshot/wp/dirty exports exist), so this is JS-side
     // bookkeeping only - see the report for details.
     refreshDriveUI(drive);
     document.getElementById(`wp${drive}`).setAttribute("aria-pressed", "false");
-    if (hadDisk) dnameEls[drive].textContent = "(empty) (保存消去)";
+    if (hadDisk) statusEl.textContent = `FD${drive + 1}: EJECTED`;
   });
-  const box = document.getElementById("ins" + drive).parentElement;
+  const box = document.getElementById("ins" + drive).closest(".drive");
   box.addEventListener("dragover", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1111,7 +2485,21 @@ for (const drive of [0, 1]) {
   });
 }
 
-document.getElementById("reset-btn").addEventListener("click", () => coldBoot());
+function systemReset() {
+  if (!Module) return;
+  stopIplWatchdog();
+  Module._emu_system_reset();
+  statusEl.textContent = "RUNNING (SYSTEM RESET)";
+  restartAudio();
+  if (!running) {
+    running = true;
+    fpsWindowStart = performance.now();
+    requestAnimationFrame(tick);
+  }
+}
+
+document.getElementById("reset-btn").addEventListener("click", systemReset);
+document.getElementById("ipl-btn").addEventListener("click", () => iplBoot());
 
 // ---- canvas drag & drop: boot from FD1 ------------------------------------
 const wrap = document.getElementById("screen-wrap");
@@ -1167,6 +2555,8 @@ setInterval(() => {
       `IM${c.im} IFF${c.iff1}${c.halted ? " HALT" : ""}\n` +
       `BANK ${j.bank.map(hex2).join(" ")}   TEXT ${j.text80 ? 80 : 40}col  ` +
       `KANJI ${hex2(j.kanji)}  IPL-ROM ${j.ipl_rom ? "loaded" : "-"}\n` +
+      `COMPAT boot=${j.compat.boot} memory=${j.compat.memory} display=${j.compat.display} ` +
+      `frame=${j.compat.frame_cycles}cyc\n` +
       `GDE  mode=${hex2(j.gde.mode)} SAD0=${hex4(j.gde.sad0)} HDSC=${j.gde.hdsc}\n` +
       `FDC  ${j.fdc.motor ? "MOTOR" : "idle"} drv${j.fdc.drive} cyl${j.fdc.cyl} ` +
       `reads=${j.fdc.reads} seeks=${j.fdc.seeks}\n` +

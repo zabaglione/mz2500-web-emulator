@@ -143,6 +143,19 @@ const D88Disk::Sector* D88Disk::find_sector(int cylinder, int side, int sector) 
     return nullptr;
 }
 
+const D88Disk::Sector* D88Disk::find_sector(int cylinder, int side, int sector,
+                                            bool single_density) const {
+    if (!loaded_) return nullptr;
+    if (side < 0 || side > 1) return nullptr;
+    const int track = track_index(cylinder, side);
+    if (track < 0 || track >= TRACK_COUNT) return nullptr;
+    for (const Sector& s : tracks_[track].sectors) {
+        if (s.r == sector && ((s.density & 0x40) != 0) == single_density)
+            return &s;
+    }
+    return nullptr;
+}
+
 const uint8_t* D88Disk::raw_sector(int cylinder, int side, int sector) const {
     const Sector* s = find_sector(cylinder, side, sector);
     // load() deliberately keeps odd-sized sectors around so serialize() can
@@ -150,6 +163,13 @@ const uint8_t* D88Disk::raw_sector(int cylinder, int side, int sector) const {
     // of raw_sector() (the FDC read path, read_decoded() below) indexes a
     // fixed SECTOR_SIZE buffer, so a declared size smaller than that would
     // read past the end of s->data. Reject it here rather than downstream.
+    if (!s || s->data.size() < static_cast<size_t>(SECTOR_SIZE)) return nullptr;
+    return s->data.data();
+}
+
+const uint8_t* D88Disk::raw_sector(int cylinder, int side, int sector,
+                                   bool single_density) const {
+    const Sector* s = find_sector(cylinder, side, sector, single_density);
     if (!s || s->data.size() < static_cast<size_t>(SECTOR_SIZE)) return nullptr;
     return s->data.data();
 }
@@ -167,12 +187,26 @@ D88Disk::Sector* D88Disk::find_sector_mut(int cylinder, int side, int sector) {
     return const_cast<Sector*>(find_sector(cylinder, side, sector));
 }
 
+D88Disk::Sector* D88Disk::find_sector_mut(int cylinder, int side, int sector,
+                                          bool single_density) {
+    return const_cast<Sector*>(find_sector(cylinder, side, sector, single_density));
+}
+
 uint8_t* D88Disk::write_sector(int cylinder, int side, int sector) {
     if (write_protected_) return nullptr;
     Sector* s = find_sector_mut(cylinder, side, sector);
     // Same guard as raw_sector(): a stored sector shorter than SECTOR_SIZE
     // must never be handed out as a writable buffer, since callers index up
     // to SECTOR_SIZE-1.
+    if (!s || s->data.size() < static_cast<size_t>(SECTOR_SIZE)) return nullptr;
+    dirty_ = true;
+    return s->data.data();
+}
+
+uint8_t* D88Disk::write_sector(int cylinder, int side, int sector,
+                               bool single_density) {
+    if (write_protected_) return nullptr;
+    Sector* s = find_sector_mut(cylinder, side, sector, single_density);
     if (!s || s->data.size() < static_cast<size_t>(SECTOR_SIZE)) return nullptr;
     dirty_ = true;
     return s->data.data();
@@ -187,8 +221,24 @@ bool D88Disk::set_deleted_mark(int cylinder, int side, int sector, bool deleted)
     return true;
 }
 
+bool D88Disk::set_deleted_mark(int cylinder, int side, int sector, bool deleted,
+                               bool single_density) {
+    if (write_protected_) return false;
+    Sector* s = find_sector_mut(cylinder, side, sector, single_density);
+    if (!s) return false;
+    s->deleted = deleted ? 0x10 : 0x00;
+    dirty_ = true;
+    return true;
+}
+
 bool D88Disk::deleted_mark(int cylinder, int side, int sector) const {
     const Sector* s = find_sector(cylinder, side, sector);
+    return s && s->deleted != 0;
+}
+
+bool D88Disk::deleted_mark(int cylinder, int side, int sector,
+                           bool single_density) const {
+    const Sector* s = find_sector(cylinder, side, sector, single_density);
     return s && s->deleted != 0;
 }
 

@@ -709,6 +709,7 @@ void z80_init(z80* const z) {
   z->write_byte = NULL;
   z->port_in = NULL;
   z->port_out = NULL;
+  z->reti = NULL;
   z->userdata = NULL;
 
   z->cyc = 0;
@@ -1556,7 +1557,10 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     z->iff1 = z->iff2;
     ret(z);
     break; // retn
-  case 0x4D: ret(z); break; // reti
+  case 0x4D:
+    ret(z);
+    if (z->reti != NULL) z->reti(z);
+    break; // reti
 
   case 0xA0: ldi(z); break; // ldi
   case 0xB0: {

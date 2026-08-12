@@ -28,6 +28,11 @@ public:
     BankedMemory() : phys_(NUM_BANKS * BANK_SIZE, 0) {}
 
     void clear();
+    void reset_control() {
+        selector_ = 0;
+        kanji_bank_ = 0;
+        dict_bank_ = 0;
+    }
 
     uint8_t read(uint16_t addr);
     void write(uint16_t addr, uint8_t value);
@@ -57,13 +62,16 @@ public:
     void set_dict_bank(uint8_t v) { dict_bank_ = v; }
 
     // User-provided ROM images (never bundled; the owner supplies files).
-    // kind: 0 = IPL (32KB -> banks 34h-37h), 2 = kanji (bank 39h window
-    // paged by CFh), 3 = dictionary (bank 3Ah window paged by CEh).
+    // kind: 0 = IPL (32KB -> banks 34h-37h), 1 = retired CG slot kept only
+    // to preserve the public kind numbering, 2 = kanji (bank 39h window
+    // paged by CFh and compatibility glyph source), 3 = dictionary
+    // (bank 3Ah window paged by CEh).
     void load_ipl_rom(const uint8_t* data, size_t size);
     void load_kanji_rom(const uint8_t* data, size_t size) { kanji_rom_.assign(data, data + size); }
     const std::vector<uint8_t>& kanji_rom() const { return kanji_rom_; }
     void load_dict_rom(const uint8_t* data, size_t size) { dict_rom_.assign(data, data + size); }
     bool has_ipl_rom() const { return ipl_rom_loaded_; }
+    bool has_kanji_rom() const { return !kanji_rom_.empty(); }
 
     // Expansion hardware presence (real machines shipped without these):
     // expansion RAM = banks 10h-1Fh (the 128KB->256KB upgrade), expansion
@@ -75,6 +83,7 @@ public:
     // like empty sockets.
     void set_expansion_ram(bool on) { expansion_ram_ = on; }
     void set_expansion_gram(bool on) { expansion_gram_ = on; }
+    bool bank_present(int bank) const { return !bank_absent(bank & 0x3F); }
 
 private:
     std::vector<uint8_t> phys_;

@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 export interface Config {
   wasmJs: string;
   iplRom?: string;
-  cgRom?: string;
   kanjiRom?: string;
   dictRom?: string;
   diskA?: string;
@@ -57,7 +56,6 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): Config {
   return {
     wasmJs,
     iplRom: arg(argv, "--ipl-rom") ?? env.MZ2500_IPL_ROM ?? fromRomDir("ipl.rom"),
-    cgRom: arg(argv, "--cg-rom") ?? env.MZ2500_CG_ROM ?? fromRomDir("cg.rom"),
     kanjiRom: arg(argv, "--kanji-rom") ?? env.MZ2500_KANJI_ROM ?? fromRomDir("kanji.rom"),
     dictRom: arg(argv, "--dict-rom") ?? env.MZ2500_DICT_ROM ?? fromRomDir("dict.rom"),
     diskA: arg(argv, "--disk-a") ?? env.MZ2500_DISK_A,

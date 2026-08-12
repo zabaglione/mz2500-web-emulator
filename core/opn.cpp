@@ -46,12 +46,16 @@ OpnYm2203::OpnYm2203() : chip_(*this) {
 }
 
 void OpnYm2203::reset() {
+    now_ = 0;
+    timer_due_[0] = timer_due_[1] = NEVER;
     chip_.reset();
     chip_rate_ = chip_.sample_rate(OPN_CLOCK_HZ);
     generated_ = 0;
-    now_ = 0;
     busy_end_ = 0;
     address_ = 0;
+    beeper_ = 0.0f;
+    port_latch_[0] = port_latch_[1] = 0;
+    io_direction_ = 0;
     src_pos_ = 0.0;
     prev_sample_ = 0.0f;
     ring_.clear();
@@ -64,31 +68,60 @@ void OpnYm2203::set_output_rate(uint32_t rate) {
     design_filters();
 }
 
+void OpnYm2203::set_ssg_io_handoff(uint8_t mixer, uint8_t port_a) {
+    chip_.write_address(0x07);
+    chip_.write_data(mixer);
+    io_direction_ = mixer;
+    chip_.write_address(0x0E);
+    chip_.write_data(port_a);
+    port_latch_[0] = port_a;
+    chip_.write_address(0x00);
+    address_ = 0;
+    busy_end_ = 0;
+}
+
 uint8_t OpnYm2203::read_status(uint64_t now) {
-    now_ = now;
+    flush_to(now);
     return chip_.read_status();
 }
 
+void OpnYm2203::ymfm_set_timer(uint32_t tnum, int32_t duration_in_clocks) {
+    if (tnum > 1) return;
+    timer_due_[tnum] = duration_in_clocks < 0
+        ? NEVER
+        : now_ + (uint64_t)duration_in_clocks * 3;
+}
+
+uint8_t OpnYm2203::ymfm_external_read(ymfm::access_class type,
+                                      uint32_t address) {
+    if (type != ymfm::ACCESS_IO || address > 1) return 0x00;
+    return port_input_[address];
+}
+
+void OpnYm2203::ymfm_external_write(ymfm::access_class type,
+                                    uint32_t address, uint8_t data) {
+    if (type == ymfm::ACCESS_IO && address < 2) port_latch_[address] = data;
+}
+
 uint8_t OpnYm2203::read_data() {
-    // register 0Fh = SSG port B: the sense lines live outside the chip
-    if (address_ == 0x0F) return port_b_input_;
     return chip_.read_data();
 }
 
 void OpnYm2203::write_address(uint8_t value, uint64_t now) {
     flush_to(now);
-    now_ = now;
     address_ = value;
     chip_.write_address(value);
 }
 
 void OpnYm2203::write_data(uint8_t value, uint64_t now) {
     flush_to(now);
-    now_ = now;
     if (trace_) {
         std::fprintf(trace_, "%llu,%02x,%02x\n", (unsigned long long)now, address_, value);
     }
     chip_.write_data(value);
+    if (address_ == 0x07) io_direction_ = value;
+    else if (address_ == 0x0E) port_latch_[0] = value;
+    else if (address_ == 0x0F) port_latch_[1] = value;
 }
 
 void OpnYm2203::push_chip_sample(float mono) {
@@ -103,7 +136,7 @@ void OpnYm2203::push_chip_sample(float mono) {
     prev_sample_ = mono;
 }
 
-void OpnYm2203::flush_to(uint64_t now) {
+void OpnYm2203::generate_to(uint64_t now) {
     // chip sample period in CPU cycles: CPU_HZ / chip_rate_ (36 at MED)
     const uint64_t target = now * chip_rate_ / CPU_HZ;
     ymfm::ym2203::output_data out;
@@ -114,6 +147,29 @@ void OpnYm2203::flush_to(uint64_t now) {
         push_chip_sample(lp2_.run(lp1_.run(fm * fm_mix_ + ssg * ssg_mix_ + beeper_)));
         generated_++;
     }
+}
+
+void OpnYm2203::flush_to(uint64_t now) {
+    // ymfm delegates Timer A/B scheduling to its host. Generate audio up to
+    // each exact deadline before notifying the engine, so timer status and
+    // CSM key-ons become visible at the same CPU time instead of being
+    // stretched to the next status poll or register write.
+    for (;;) {
+        const uint64_t next = std::min(timer_due_[0], timer_due_[1]);
+        if (next == NEVER || next > now) break;
+
+        generate_to(next);
+        now_ = next;
+        for (uint32_t t = 0; t < 2; t++) {
+            if (timer_due_[t] != NEVER && timer_due_[t] <= next) {
+                timer_due_[t] = NEVER;
+                m_engine->engine_timer_expired(t);
+            }
+        }
+    }
+
+    generate_to(now);
+    now_ = now;
 }
 
 size_t OpnYm2203::read_audio(float* out, size_t max_samples) {

@@ -17,9 +17,7 @@ void BankedMemory::clear() {
         if (!(ipl_rom_loaded_ && bank >= 0x34 && bank <= 0x37))
             std::memset(phys_.data() + bank * BANK_SIZE, 0, BANK_SIZE);
     }
-    selector_ = 0;
-    kanji_bank_ = 0;
-    dict_bank_ = 0;
+    reset_control();
 }
 
 void BankedMemory::load_ipl_rom(const uint8_t* data, size_t size) {

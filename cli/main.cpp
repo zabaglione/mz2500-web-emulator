@@ -646,7 +646,7 @@ int main(int argc, char** argv) {
     if (no_emm) machine.set_hw_option(4, false);
     if (!rom_dir.empty()) {
         static const struct { const char* file; int kind; } roms[] = {
-            {"ipl.rom", 0}, {"cg.rom", 1}, {"kanji.rom", 2}, {"dict.rom", 3}};
+            {"ipl.rom", 0}, {"kanji.rom", 2}, {"dict.rom", 3}};
         for (const auto& r : roms) {
             const std::string path = rom_dir + "/" + r.file;
             FILE* f = std::fopen(path.c_str(), "rb");

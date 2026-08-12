@@ -45,7 +45,7 @@ interface WasmModule {
   UTF8ToString(ptr: number): string;
 }
 
-export const ROM_KIND = { ipl: 0, cg: 1, kanji: 2, dict: 3 } as const;
+export const ROM_KIND = { ipl: 0, kanji: 2, dict: 3 } as const;
 export type RomKind = keyof typeof ROM_KIND;
 
 export interface TypeOptions {
