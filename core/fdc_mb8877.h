@@ -40,6 +40,7 @@ public:
     static constexpr uint64_t CYC_PER_BYTE_FM = 384;    // 64 us, 125 kbps
     static constexpr uint64_t CYC_PER_BYTE = CYC_PER_BYTE_MFM;
     static constexpr uint64_t CYC_PER_REV = 1'200'000;  // 200 ms (300 rpm)
+    static constexpr uint64_t CYC_INDEX_PULSE = 6'000;  // 1 ms index hole
     static constexpr uint64_t CYC_PER_STEP = 18'000;    // 3 ms
 
     // Status bits. The chip reuses the same byte for two meanings: bits 1-5
@@ -69,7 +70,7 @@ public:
     uint8_t read(int reg, uint64_t now);
     void write(int reg, uint8_t value, uint64_t now);
 
-    void write_drive(uint8_t value); // port DCh (bit7 motor, low bits drive)
+    void write_drive(uint8_t value, uint64_t now = 0); // port DCh (bit7 motor, low bits drive)
     void write_side(uint8_t value);  // port DDh
     void set_single_density(bool single) { single_density_ = single; }
     bool single_density() const { return single_density_; }
@@ -94,6 +95,10 @@ private:
     enum class State { Idle, TypeI, Read, Write, ReadAddr, WriteTrack, ReadTrack };
 
     uint8_t status_at(uint64_t now);
+    bool index_pulse(uint64_t now) const {
+        return last_type1_ && motor_ && index_origin_valid_ && now >= index_origin_ &&
+               ((now - index_origin_) % CYC_PER_REV) < CYC_INDEX_PULSE;
+    }
     // Real MB8877 hardware is clocked by the rotating disk, not by whether
     // the CPU (or a DMA channel) ever reads/writes a byte through the data
     // register: bytes arrive and depart on schedule regardless, and one the
@@ -125,11 +130,20 @@ private:
     uint64_t byte_ready(int index) const {
         return read_start_ + (uint64_t)index * byte_cycles();
     }
-    const uint8_t* active_sector() const {
+    const D88Disk::Sector* active_record() const {
         const D88Disk* d = disks_[read_drive_];
-        return d ? d->raw_sector(read_cyl_, read_side_, read_sector_,
-                                 command_single_density_)
+        return d ? d->sector(read_cyl_, read_side_, read_sector_,
+                             command_single_density_)
                  : nullptr;
+    }
+    int active_transfer_size() const {
+        const D88Disk::Sector* record = active_record();
+        return record ? static_cast<int>(D88Disk::fdc_transfer_size(*record)) : 0;
+    }
+    const uint8_t* active_sector() const {
+        const D88Disk::Sector* record = active_record();
+        return record && D88Disk::fdc_transfer_supported(*record)
+            ? record->data.data() : nullptr;
     }
     // Whether the sector READ SECTOR is currently (or about to be) serving
     // carries the deleted-data mark WRITE SECTOR's a0 flag left on it. Read
@@ -138,8 +152,8 @@ private:
     // renders as F8h vs FBh.
     bool active_sector_deleted() const {
         const D88Disk* d = disks_[read_drive_];
-        return d && d->deleted_mark(read_cyl_, read_side_, read_sector_,
-                                    command_single_density_);
+        return d && d->deleted_mark_record(read_cyl_, read_side_, read_sector_,
+                                           command_single_density_);
     }
     // Last direction a STEP command moved the head, so a bare STEP repeats it.
     int step_dir_ = 1;
@@ -166,6 +180,8 @@ private:
     int side_ = 0;
     int drive_ = 0;
     bool motor_ = false;
+    uint64_t index_origin_ = 0;
+    bool index_origin_valid_ = false;
     bool single_density_ = false;
     // DEh is sampled when a Type II/III command starts. A mid-transfer port
     // write affects the next command, not the record or bit rate in flight.
@@ -181,6 +197,7 @@ private:
     int read_side_ = 0;
     int read_sector_ = 1;
     int read_index_ = 0;
+    int read_transfer_size_ = 0;
     uint64_t read_start_ = 0; // cycle at which byte 0 becomes available
     // Cycle of the most recent access to the data register (reg 3) for the
     // transfer in flight; the real-time fallback in advance_read_realtime()
@@ -201,13 +218,14 @@ private:
     // active WRITE SECTOR
     uint8_t* write_target() {
         D88Disk* d = disks_[read_drive_];
-        return d ? d->write_sector(read_cyl_, read_side_, read_sector_,
+        return d ? d->write_record(read_cyl_, read_side_, read_sector_,
                                    command_single_density_)
                  : nullptr;
     }
     bool write_multiple_ = false;
     bool read_multiple_ = false;
     int write_index_ = 0;
+    int write_transfer_size_ = 0;
     uint64_t write_start_ = 0;
     // Same idea as read_last_access_, for the write side (advance_write_realtime()).
     uint64_t write_last_access_ = 0;

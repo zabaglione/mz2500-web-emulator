@@ -5,10 +5,10 @@
 // repository's build tools (games/neko_can_run/tools/make_d88.py,
 // shared/mz2500/d88.py):
 //
-//   LBA 16 (cyl 0 / side 1 / sector 1): header 01h "IPLPRO", 12-byte title,
+//   C=0/H=1/R=1: header 01h "IPLPRO", 12-byte title,
 //     [0x18:0x1A] load & entry address, [0x20] physical bank for the payload,
 //     [0x30:0x37] CPU block 0-6 bank assignments
-//   LBA 0-15 and 32-47: the 8KB boot payload
+//   C=0/H=0/R=1..16 and C=1/H=0/R=1..16: the 8KB boot payload
 //
 // It also establishes the initial device state the real IPL leaves behind:
 // CPU block 7 mapped to bank 0Fh, kanji bank register = 0 (bank 39h reads as
@@ -94,8 +94,8 @@ bool Mz2500::boot_from_disk() {
     }
 
     uint8_t header[D88Disk::SECTOR_SIZE];
-    if (!boot_disk.read_decoded(16, header)) {
-        std::fprintf(stderr, "[ipl] cannot read boot header sector (LBA 16)\n");
+    if (!boot_disk.read_decoded(0, 1, 1, header, sizeof(header))) {
+        std::fprintf(stderr, "[ipl] cannot read boot header sector (C=0 H=1 R=1)\n");
         return false;
     }
     if (header[0] != 0x01 || std::memcmp(header + 1, "IPLPRO", 6) != 0) {
@@ -140,11 +140,16 @@ bool Mz2500::boot_from_disk() {
 
     const uint8_t payload_bank = header[0x20] & 0x3F;
     uint8_t* dest = mem_.bank_ptr(payload_bank);
-    for (int i = 0; i < 16; i++) {
-        if (!boot_disk.read_decoded(i, dest + i * D88Disk::SECTOR_SIZE)) return false;
-    }
-    for (int i = 0; i < 16; i++) {
-        if (!boot_disk.read_decoded(32 + i, dest + (16 + i) * D88Disk::SECTOR_SIZE)) return false;
+    for (int r = 1; r <= D88Disk::SECTORS_PER_TRACK; r++) {
+        if (!boot_disk.read_decoded(0, 0, r,
+                                    dest + (r - 1) * D88Disk::SECTOR_SIZE,
+                                    D88Disk::SECTOR_SIZE))
+            return false;
+        if (!boot_disk.read_decoded(1, 0, r,
+                                    dest + (D88Disk::SECTORS_PER_TRACK + r - 1) *
+                                        D88Disk::SECTOR_SIZE,
+                                    D88Disk::SECTOR_SIZE))
+            return false;
     }
 
     for (int block = 0; block < 7; block++) mem_.set_map(block, header[0x30 + block]);

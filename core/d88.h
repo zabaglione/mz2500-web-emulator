@@ -34,6 +34,21 @@ public:
         uint8_t status = 0x00;  // FDC status recorded at dump time
         std::vector<uint8_t> data;
     };
+
+    // Facts found while parsing an image. A short record is retained so the
+    // image can be diagnosed and serialized again, but it is not a usable
+    // MB8877 transfer record. N >= 4 is also retained for inspection and
+    // serialization, but is outside the FDC transfer range implemented here.
+    struct LoadReport {
+        bool structural_error = false;
+        bool image_size_mismatch = false;
+        int invalid_track_offsets = 0;
+        int track_count_mismatches = 0;
+        int records = 0;
+        int short_records = 0;
+        int truncated_records = 0;
+        int unsupported_n_records = 0;
+    };
     struct Track {
         std::vector<Sector> sectors;
     };
@@ -51,6 +66,29 @@ public:
     // Rebuild the D88 byte stream from the parsed tracks.
     std::vector<uint8_t> serialize() const;
 
+    // D88's N field describes 128 << N bytes. This reports the nominal size
+    // for any shift that fits in size_t; the FDC-specific range is exposed by
+    // fdc_transfer_size()/fdc_transfer_supported().
+    static bool nominal_sector_size(uint8_t n, size_t& size);
+    static size_t fdc_transfer_size(const Sector& sector);
+    static bool fdc_transfer_supported(const Sector& sector);
+
+    const LoadReport& load_report() const { return load_report_; }
+    bool has_structural_error() const {
+        return load_report_.structural_error || load_report_.image_size_mismatch;
+    }
+    bool has_unsupported_records() const {
+        return load_report_.unsupported_n_records != 0 ||
+               load_report_.short_records != 0;
+    }
+
+    // Locate the physical record by the ID field, including C/H/R and
+    // density. sector_at() below intentionally remains a physical-order
+    // accessor for READ ADDRESS and READ TRACK.
+    const Sector* sector(int cylinder, int side, int record) const;
+    const Sector* sector(int cylinder, int side, int record,
+                         bool single_density) const;
+
     // Physical addressing (sector is 1-based as in the ID field). Returns
     // nullptr when the sector does not exist on the mounted image.
     const uint8_t* raw_sector(int cylinder, int side, int sector) const;
@@ -61,11 +99,21 @@ public:
     // track = lba/16 (D88 track index), sector = lba%16 + 1.
     bool read_decoded(int lba, uint8_t out[SECTOR_SIZE]) const;
 
+    // Coordinate addressing used by boot code and variable-record media.
+    // The output receives the record's nominal FDC transfer length after the
+    // D88 storage inversion. The caller supplies the output capacity.
+    bool read_decoded(int cylinder, int side, int record, uint8_t* out,
+                      size_t capacity) const;
+
+    // IPLPRO is the repository's conventional dummy-IPL layout: the header
+    // is C=0/H=1/R=1 and the two 16-record payload tracks are C=0/H=0 and
+    // C=1/H=0. No LBA arithmetic is used for this check.
+    bool is_iplpro_compatible() const;
+
     // Writable view of a sector's stored bytes. Returns nullptr when the
-    // sector is not on the disk (record not found), its stored size is
-    // smaller than SECTOR_SIZE (same guard as raw_sector(), since callers
-    // index up to SECTOR_SIZE-1), or the disk is write protected. Marks the
-    // image dirty so the frontend knows to persist it.
+    // sector is not on the disk, its N/data pair is not a supported complete
+    // MB8877 transfer record, or the disk is write protected. Marks the image
+    // dirty so the frontend knows to persist it.
     //
     // Lifetime: the returned pointer aliases Sector::data inside a
     // std::vector<Sector>, so it is valid only until the next call that
@@ -77,11 +125,18 @@ public:
     uint8_t* write_sector(int cylinder, int side, int sector);
     uint8_t* write_sector(int cylinder, int side, int sector,
                           bool single_density);
+    // Same writable view, but matching the complete C/H/R ID and density.
+    // The legacy write_sector() overloads retain their physical-track lookup
+    // contract for existing callers.
+    uint8_t* write_record(int cylinder, int side, int sector,
+                          bool single_density);
 
     // Set or clear the deleted-data mark the FDC reports on the next read.
     bool set_deleted_mark(int cylinder, int side, int sector, bool deleted);
     bool set_deleted_mark(int cylinder, int side, int sector, bool deleted,
                           bool single_density);
+    bool set_deleted_mark_record(int cylinder, int side, int sector,
+                                 bool deleted, bool single_density);
 
     // Whether a sector currently carries the deleted-data mark (false when
     // the sector does not exist). READ SECTOR consults this to report
@@ -91,6 +146,8 @@ public:
     bool deleted_mark(int cylinder, int side, int sector) const;
     bool deleted_mark(int cylinder, int side, int sector,
                       bool single_density) const;
+    bool deleted_mark_record(int cylinder, int side, int sector,
+                             bool single_density) const;
 
     // Lay a track down, replacing whatever was there. The sector order is
     // kept exactly as handed in - the interleave belongs to the software
@@ -126,6 +183,7 @@ private:
     bool loaded_ = false;
     bool write_protected_ = false;
     bool dirty_ = false;
+    LoadReport load_report_;
 
     // Header fields captured verbatim by load() so serialize() can hand
     // them back instead of writing zeroed/hardcoded defaults.

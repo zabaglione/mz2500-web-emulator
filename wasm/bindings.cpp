@@ -40,6 +40,13 @@ EMSCRIPTEN_KEEPALIVE void emu_disk_eject(int drive) {
     if (g_machine) g_machine->eject_disk(drive);
 }
 
+// 0=no disk, 1=IPLPRO-compatible dummy-IPL disk, 2=valid disk requiring the
+// user-provided IPL ROM, 3=structurally invalid or FDC-unsupported records.
+EMSCRIPTEN_KEEPALIVE int emu_disk_boot_profile(int drive) {
+    if (!g_machine) return static_cast<int>(mz::Mz2500::DiskBootProfile::NoDisk);
+    return static_cast<int>(g_machine->disk_boot_profile(drive));
+}
+
 // ---- written disks: hand the image back for the browser to keep ---------
 namespace {
 std::vector<uint8_t> g_disk_out;

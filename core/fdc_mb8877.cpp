@@ -26,14 +26,18 @@ void FdcMb8877::reset() {
     side_ = 0;
     drive_ = 0;
     motor_ = false;
+    index_origin_ = 0;
+    index_origin_valid_ = false;
     single_density_ = false;
     command_single_density_ = false;
     busy_until_ = 0;
     read_valid_ = false;
     read_index_ = 0;
+    read_transfer_size_ = 0;
     read_start_ = 0;
     read_last_access_ = 0;
     write_index_ = 0;
+    write_transfer_size_ = 0;
     write_start_ = 0;
     write_last_access_ = 0;
     write_multiple_ = false;
@@ -73,14 +77,17 @@ void FdcMb8877::reset() {
 // in multi-sector mode the search for the next sequential record has
 // already begun, exactly as it would on real hardware.
 void FdcMb8877::advance_read_realtime(uint64_t now) {
-    while (read_index_ < 256 && now >= read_last_access_ + byte_cycles() * 256) {
+    while (read_index_ < read_transfer_size_ &&
+           now >= read_last_access_ + byte_cycles() * read_transfer_size_) {
         done_status_ |= ST_LOST;
         if (read_multiple_ && sector_reg_ < 255) {
+            const int finished_size = read_transfer_size_;
             sector_reg_++;
             read_sector_ = sector_reg_;
             if (active_sector() != nullptr) {
+                read_transfer_size_ = active_transfer_size();
                 read_index_ = 0;
-                read_start_ = byte_ready(256) + byte_cycles() * 2;
+                read_start_ = byte_ready(finished_size) + byte_cycles() * 2;
                 read_last_access_ = read_start_; // fresh quiet window for the new sector
                 // ST_REC_TYPE reflects the sector just landed on, not the
                 // one the walk left behind; ST_LOST (already ORed in above)
@@ -93,11 +100,11 @@ void FdcMb8877::advance_read_realtime(uint64_t now) {
             // up, same convention as the CPU-driven continuation in read().
             done_status_ = ST_RNF;
             busy_until_ = now + CYC_PER_REV;
-            read_index_ = 256;
+            read_index_ = read_transfer_size_;
             return;
         }
-        read_index_ = 256;
-        busy_until_ = byte_ready(256) + byte_cycles() * 2;
+        read_index_ = read_transfer_size_;
+        busy_until_ = byte_ready(read_transfer_size_) + byte_cycles() * 2;
         return;
     }
 }
@@ -116,24 +123,27 @@ void FdcMb8877::advance_read_realtime(uint64_t now) {
 // outcome than a documented deviation from real hardware, so this is a
 // conscious trade, not an oversight.
 void FdcMb8877::advance_write_realtime(uint64_t now) {
-    while (write_index_ < 256 && now >= write_last_access_ + byte_cycles() * 256) {
+    while (write_index_ < write_transfer_size_ &&
+           now >= write_last_access_ + byte_cycles() * write_transfer_size_) {
         done_status_ |= ST_LOST;
         if (write_multiple_ && sector_reg_ < 255) {
+            const int finished_size = write_transfer_size_;
             sector_reg_++;
             read_sector_ = sector_reg_;
             if (write_target() != nullptr) {
+                write_transfer_size_ = active_transfer_size();
                 write_index_ = 0;
-                write_start_ = byte_due(write_start_, 256) + byte_cycles() * 2;
+                write_start_ = byte_due(write_start_, finished_size) + byte_cycles() * 2;
                 write_last_access_ = write_start_; // fresh quiet window for the new sector
                 continue;
             }
             done_status_ = ST_RNF;
             busy_until_ = now + CYC_PER_REV;
-            write_index_ = 256;
+            write_index_ = write_transfer_size_;
             return;
         }
-        write_index_ = 256;
-        busy_until_ = byte_due(write_start_, 256) + byte_cycles() * 2;
+        write_index_ = write_transfer_size_;
+        busy_until_ = byte_due(write_start_, write_transfer_size_) + byte_cycles() * 2;
         return;
     }
 }
@@ -188,6 +198,7 @@ void FdcMb8877::advance_readtrack_realtime(uint64_t now) {
 
 uint8_t FdcMb8877::status_at(uint64_t now) {
     const uint8_t wp = disk_write_protected() ? ST_WP : 0;
+    const uint8_t index = index_pulse(now) ? ST_INDEX : 0;
     switch (state_) {
     case State::Idle:
         // Bit2 only means TRACK00 after a Type I command; after a Type
@@ -195,13 +206,13 @@ uint8_t FdcMb8877::status_at(uint64_t now) {
         // synthesised from head position, or a driver polling status after a
         // completed read/write would see a spurious LOST DATA whenever the
         // head happens to sit on track 0.
-        return done_status_ | wp |
+        return done_status_ | wp | index |
                (last_type1_ && phys_cyl_[drive_] == 0 ? ST_TRACK0 : 0);
     case State::TypeI:
-        if (now < busy_until_) return ST_BUSY | wp;
+        if (now < busy_until_) return ST_BUSY | wp | index;
         state_ = State::Idle;
         done_status_ = 0;
-        return wp | (phys_cyl_[drive_] == 0 ? ST_TRACK0 : 0);
+        return wp | index | (phys_cyl_[drive_] == 0 ? ST_TRACK0 : 0);
     case State::Read:
         if (!read_valid_) {
             // record-not-found spin
@@ -210,7 +221,7 @@ uint8_t FdcMb8877::status_at(uint64_t now) {
             return done_status_;
         }
         advance_read_realtime(now);
-        if (read_index_ >= 256) {
+        if (read_index_ >= read_transfer_size_) {
             // record-not-found spin (walked off the track), or CRC tail
             // after the last byte
             if (now < busy_until_) return ST_BUSY;
@@ -220,7 +231,7 @@ uint8_t FdcMb8877::status_at(uint64_t now) {
         return ST_BUSY | (now >= byte_ready(read_index_) ? ST_DRQ : 0);
     case State::Write:
         advance_write_realtime(now);
-        if (write_index_ >= 256) {
+        if (write_index_ >= write_transfer_size_) {
             // record-not-found spin, or the CRC tail after the last byte
             if (now < busy_until_) return ST_BUSY | wp;
             state_ = State::Idle;
@@ -305,19 +316,24 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
                 busy_until_ = byte_ready(read_track_index_) + byte_cycles();
             return value;
         }
-        if (state_ == State::Read && read_valid_ && read_index_ < 256 &&
+        if (state_ == State::Read && read_valid_ &&
+            read_index_ < read_transfer_size_ &&
             now >= byte_ready(read_index_)) {
             const uint8_t* sector = active_sector();
             const uint8_t value = sector ? sector[read_index_] : 0xFF;
             read_index_++;
-            if (read_index_ >= 256) {
+            if (read_index_ >= read_transfer_size_) {
                 if (read_multiple_ && sector_reg_ < 255) {
-                    // multi-sector: the chip walks on to the next record
+                    // Multi-sector follows the next R ID, not the next
+                    // physical vector element. active_sector() performs the
+                    // C/H/R+density lookup against the preserved track.
+                    const int finished_size = read_transfer_size_;
                     sector_reg_++;
                     read_sector_ = sector_reg_;
                     if (active_sector() != nullptr) {
+                        read_transfer_size_ = active_transfer_size();
                         read_index_ = 0;
-                        read_start_ = byte_ready(256) + byte_cycles() * 2;
+                        read_start_ = byte_ready(finished_size) + byte_cycles() * 2;
                         // ST_REC_TYPE reflects the sector just landed on.
                         if (active_sector_deleted()) done_status_ |= ST_REC_TYPE;
                         else done_status_ &= (uint8_t)~ST_REC_TYPE;
@@ -333,7 +349,7 @@ uint8_t FdcMb8877::read(int reg, uint64_t now) {
                     return value;
                 }
                 // busy stays up while the CRC bytes pass under the head
-                busy_until_ = byte_ready(256) + byte_cycles() * 2;
+                busy_until_ = byte_ready(read_transfer_size_) + byte_cycles() * 2;
             }
             return value;
         }
@@ -400,11 +416,12 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             read_side_ = side_;
             read_sector_ = sector_reg_;
             read_index_ = 0;
+            read_transfer_size_ = active_transfer_size();
             state_ = State::Read;
             const bool found = active_sector() != nullptr && track_reg_ == phys_cyl_[drive_];
             read_valid_ = found;
             if (!found) {
-                read_index_ = 256;
+                read_index_ = read_transfer_size_;
                 done_status_ = ST_RNF;
                 busy_until_ = now + CYC_PER_REV; // spins one revolution, then RNF
             } else {
@@ -426,6 +443,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             read_side_ = side_;
             read_sector_ = sector_reg_;
             write_index_ = 0;
+            write_transfer_size_ = active_transfer_size();
             if (disk_write_protected()) {
                 // the chip never starts the write; the status byte says why
                 state_ = State::Idle;
@@ -442,14 +460,15 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                                write_target() != nullptr;
             state_ = State::Write;
             if (!found) {
-                write_index_ = 256;
+                write_index_ = write_transfer_size_;
                 done_status_ = ST_RNF;
                 busy_until_ = now + CYC_PER_REV;
             } else {
                 D88Disk* d = disks_[read_drive_];
-                if (d) d->set_deleted_mark(read_cyl_, read_side_, read_sector_,
-                                           (cmd & 0x01) != 0,
-                                           command_single_density_);
+                if (d) d->set_deleted_mark_record(read_cyl_, read_side_,
+                                                  read_sector_,
+                                                  (cmd & 0x01) != 0,
+                                                  command_single_density_);
                 done_status_ = 0;
                 write_start_ = now + read_latency_cycles_ + byte_cycles();
                 write_last_access_ = write_start_; // quiet-window clock starts fresh
@@ -480,7 +499,8 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 const D88Disk::Sector* candidate =
                     d->sector_at(read_cyl_, read_side_, id_next_++);
                 if (candidate &&
-                    ((candidate->density & 0x40) != 0) == command_single_density_) {
+                    ((candidate->density & 0x40) != 0) == command_single_density_ &&
+                    D88Disk::fdc_transfer_supported(*candidate)) {
                     sec = candidate;
                     break;
                 }
@@ -529,12 +549,18 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
             read_track_index_ = 0;
             const D88Disk* d = disks_[read_drive_];
             const uint8_t gap = command_single_density_ ? 0xFF : 0x4E;
+            bool skipped_unsupported = false;
             for (int i = 0; i < 40; i++) read_track_stream_.push_back(gap);
             const int count = d ? d->sector_count(read_cyl_, read_side_) : 0;
             for (int i = 0; i < count; i++) {
                 const D88Disk::Sector* sec = d->sector_at(read_cyl_, read_side_, i);
                 if (!sec) break;
                 if (((sec->density & 0x40) != 0) != command_single_density_) continue;
+                const size_t transfer_size = D88Disk::fdc_transfer_size(*sec);
+                if (transfer_size == 0) {
+                    skipped_unsupported = true;
+                    continue;
+                }
                 for (int g = 0; g < 12; g++) read_track_stream_.push_back(0x00);
                 read_track_stream_.push_back(0xFE);
                 read_track_stream_.push_back(sec->c);
@@ -544,7 +570,8 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 read_track_stream_.push_back(0xF7);
                 for (int g = 0; g < 22; g++) read_track_stream_.push_back(gap);
                 read_track_stream_.push_back(sec->deleted ? 0xF8 : 0xFB);
-                for (uint8_t b : sec->data) read_track_stream_.push_back(b);
+                for (size_t b = 0; b < transfer_size; b++)
+                    read_track_stream_.push_back(sec->data[b]);
                 read_track_stream_.push_back(0xF7);
                 for (int g = 0; g < 24; g++) read_track_stream_.push_back(gap);
             }
@@ -557,7 +584,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 // transfer at exactly one 300 rpm revolution: 6250 bytes at
                 // MFM 250 kbps or 3125 bytes at FM 125 kbps.
                 read_track_stream_.resize((size_t)track_stream_bytes(), gap);
-                done_status_ = 0;
+                done_status_ = skipped_unsupported ? ST_RNF : 0;
             } else {
                 // Blank track: the stream is only the leading gap, so DRQ
                 // genuinely asserts for those bytes. A driver that follows
@@ -623,19 +650,21 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                 busy_until_ = byte_due(write_start_, track_index_) + byte_cycles() * 2;
             }
         }
-        if (state_ == State::Write && write_index_ < 256 &&
+        if (state_ == State::Write && write_index_ < write_transfer_size_ &&
             now >= byte_due(write_start_, write_index_)) {
             uint8_t* dst = write_target();
             if (dst) dst[write_index_] = value;
             write_index_++;
-            if (write_index_ >= 256) {
+            if (write_index_ >= write_transfer_size_) {
                 if (write_multiple_ && sector_reg_ < 255) {
-                    // multi-sector: the chip walks on to the next record
+                    // Multi-sector follows the next R ID, not physical order.
+                    const int finished_size = write_transfer_size_;
                     sector_reg_++;
                     read_sector_ = sector_reg_;
                     if (write_target() != nullptr) {
+                        write_transfer_size_ = active_transfer_size();
                         write_index_ = 0;
-                        write_start_ = byte_due(write_start_, 256) + byte_cycles() * 2;
+                        write_start_ = byte_due(write_start_, finished_size) + byte_cycles() * 2;
                         data_reg_ = value;
                         break;
                     }
@@ -649,7 +678,7 @@ void FdcMb8877::write(int reg, uint8_t value, uint64_t now) {
                     data_reg_ = value;
                     break;
                 }
-                busy_until_ = byte_due(write_start_, 256) + byte_cycles() * 2;
+                busy_until_ = byte_due(write_start_, write_transfer_size_) + byte_cycles() * 2;
             }
         }
         data_reg_ = value;
@@ -666,20 +695,17 @@ void FdcMb8877::commit_track_stream() {
     std::vector<D88Disk::Sector> sectors;
     const size_t n = track_stream_.size();
     size_t i = 0;
-    // One summary line per format operation (this function runs once per
-    // WRITE TRACK command, i.e. once per physical track formatted), not one
-    // per offending sector -- a full-disk format lays down ~16 sectors per
-    // track, so logging inside the loop below meant one unsupported N could
-    // print ~2560 lines for a whole-disk format, all landing in the
-    // browser's console. Collect the details of the first offender and a
-    // count instead, and print exactly one line after the loop.
-    int unsupported_size_count = 0;
-    size_t unsupported_size_first_bytes = 0;
-    uint8_t unsupported_size_first_n = 0, unsupported_size_first_c = 0,
-            unsupported_size_first_h = 0, unsupported_size_first_r = 0;
+    bool invalid = false;
+    int unsupported_n_count = 0;
+    uint8_t first_bad_n = 0, first_bad_c = 0, first_bad_h = 0, first_bad_r = 0;
+    const char* first_bad_reason = nullptr;
     while (i < n) {
         if (track_stream_[i] != 0xFE) { i++; continue; }
-        if (i + 5 > n) break;
+        if (i + 5 > n) {
+            invalid = true;
+            first_bad_reason = first_bad_reason ? first_bad_reason : "incomplete ID";
+            break;
+        }
         D88Disk::Sector sec;
         sec.c = track_stream_[i + 1];
         sec.h = track_stream_[i + 2];
@@ -692,51 +718,74 @@ void FdcMb8877::commit_track_stream() {
                track_stream_[i] != 0xFE) {
             i++;
         }
-        if (i >= n || track_stream_[i] == 0xFE) continue; // ID with no data
+        if (i >= n || track_stream_[i] == 0xFE) {
+            invalid = true;
+            first_bad_reason = first_bad_reason ? first_bad_reason : "ID without data";
+            break;
+        }
         sec.deleted = track_stream_[i] == 0xF8 ? 0x10 : 0x00;
         i++;
-        const size_t size = (size_t)128 << (sec.n & 3);
-        // D88Disk::raw_sector()/write_sector() both refuse a sector whose
-        // stored size is under SECTOR_SIZE (256 bytes) -- this codebase only
-        // supports N=1. A format that lays down any other N (including N=0,
-        // the MB8877's other common 128-byte code, or any N whose low two
-        // bits happen to alias N=0 through the "& 3" above, e.g. N=4) still
-        // gets *parsed and stored* here, but every subsequent READ/WRITE
-        // SECTOR against it will report RECORD NOT FOUND -- a confusing
-        // failure that gives no hint why. Name it here instead of leaving
-        // the caller to guess.
-        if (size != (size_t)D88Disk::SECTOR_SIZE) {
-            if (unsupported_size_count == 0) {
-                unsupported_size_first_bytes = size;
-                unsupported_size_first_n = sec.n;
-                unsupported_size_first_c = sec.c;
-                unsupported_size_first_h = sec.h;
-                unsupported_size_first_r = sec.r;
+        size_t size = 0;
+        if (!D88Disk::nominal_sector_size(sec.n, size) || sec.n > 3) {
+            invalid = true;
+            unsupported_n_count++;
+            if (!first_bad_reason) {
+                first_bad_reason = "unsupported N";
+                first_bad_n = sec.n;
+                first_bad_c = sec.c;
+                first_bad_h = sec.h;
+                first_bad_r = sec.r;
             }
-            unsupported_size_count++;
+            break;
         }
-        const size_t avail = n - i > size ? size : n - i;
-        sec.data.assign(track_stream_.begin() + i, track_stream_.begin() + i + avail);
-        sec.data.resize(size, 0);
-        i += avail;
+        if (n - i < size) {
+            invalid = true;
+            first_bad_reason = first_bad_reason ? first_bad_reason : "incomplete data";
+            break;
+        }
+        sec.data.assign(track_stream_.begin() + i,
+                        track_stream_.begin() + i + size);
+        i += size;
         sectors.push_back(std::move(sec));
     }
-    if (unsupported_size_count > 0) {
+
+    if (invalid || sectors.empty()) {
+        if (invalid) {
+            if (unsupported_n_count > 0) {
+                std::fprintf(stderr,
+                             "[fdc] format rejected: %s N=%u at C=%u H=%u R=%u\n",
+                             first_bad_reason ? first_bad_reason : "invalid format",
+                             first_bad_n, first_bad_c, first_bad_h, first_bad_r);
+            } else {
+                std::fprintf(stderr, "[fdc] format rejected: %s\n",
+                             first_bad_reason ? first_bad_reason : "invalid format");
+            }
+        }
+        track_stream_.clear();
+        return;
+    }
+
+    if (unsupported_n_count > 0) {
         std::fprintf(stderr,
-                     "[fdc] format: unsupported sector size %zu bytes (N=%u) at "
-                     "C=%u H=%u R=%u (+%d more this track) -- these sectors will read "
-                     "back as RECORD NOT FOUND\n",
-                     unsupported_size_first_bytes, unsupported_size_first_n,
-                     unsupported_size_first_c, unsupported_size_first_h,
-                     unsupported_size_first_r, unsupported_size_count - 1);
+                     "[fdc] format rejected: unsupported N=%u at C=%u H=%u R=%u\n",
+                     first_bad_n, first_bad_c, first_bad_h, first_bad_r);
+        track_stream_.clear();
+        return;
     }
     D88Disk* d = disks_[read_drive_];
-    if (d && !sectors.empty()) d->format_track(read_cyl_, read_side_, sectors);
+    if (d) d->format_track(read_cyl_, read_side_, sectors);
     track_stream_.clear();
 }
 
-void FdcMb8877::write_drive(uint8_t value) {
-    motor_ = (value & 0x80) != 0 && (value & 0x04) != 0;
+void FdcMb8877::write_drive(uint8_t value, uint64_t now) {
+    const bool next_motor = (value & 0x80) != 0 && (value & 0x04) != 0;
+    if (next_motor && !motor_) {
+        index_origin_ = now;
+        index_origin_valid_ = true;
+    } else if (!next_motor) {
+        index_origin_valid_ = false;
+    }
+    motor_ = next_motor;
     drive_ = value & 0x01;
 }
 

@@ -35,6 +35,13 @@ public:
     // and this core hit audio_boot at frame 562 and title BGM at frame 1804.
     static constexpr int DEFAULT_BOOT_DELAY_FRAMES = 249;
 
+    enum class DiskBootProfile : uint8_t {
+        NoDisk = 0,
+        IplProCompatible = 1,
+        RealIplRequired = 2,
+        Invalid = 3,
+    };
+
     Mz2500();
 
     // Two floppy drives (FD1 = drive 0, FD2 = drive 1). Inserting is a hot
@@ -46,6 +53,15 @@ public:
     bool insert_disk(const std::string& path) { return insert_disk(0, path); }
     void eject_disk(int drive) { disks_[drive & 1].eject(); }
     bool disk_loaded(int drive) const { return disks_[drive & 1].loaded(); }
+    DiskBootProfile disk_boot_profile(int drive) const {
+        const D88Disk& disk = disks_[drive & 1];
+        if (!disk.loaded()) return DiskBootProfile::NoDisk;
+        if (disk.has_structural_error() || disk.has_unsupported_records())
+            return DiskBootProfile::Invalid;
+        return disk.is_iplpro_compatible()
+            ? DiskBootProfile::IplProCompatible
+            : DiskBootProfile::RealIplRequired;
+    }
 
     // Put an unformatted floppy in a drive. Every read reports record-not-
     // found until a format lays tracks down - a brand-new disk, in other

@@ -2043,18 +2043,38 @@ async function iplBoot(options = {}) {
     stopAtIplPrompt("LEGACY MODE REQUIRES MZ-2500 IPL.ROM AND KANJI.ROM");
     return false;
   }
-  const wantRealIpl = !options.forceDummyIpl && hasIpl &&
-    (realIplEl.checked || requestedBootMode !== 0);
+  if (drives[0] && !pushVolume(0)) {
+    stopAtIplPrompt("D88 IMAGE COULD NOT BE MOUNTED");
+    return false;
+  }
+  if (drives[1] && !pushVolume(1)) {
+    stopAtIplPrompt("D88 IMAGE COULD NOT BE MOUNTED");
+    return false;
+  }
+
+  // The core inspects the mounted records rather than the filename. This
+  // keeps IPLPRO as the only automatic dummy-IPL case and makes every other
+  // structurally valid D88 require the owner's real IPL ROM.
+  const diskProfile = drives[0] ? Module._emu_disk_boot_profile(0) : 0;
+  if (diskProfile === 3) {
+    stopAtIplPrompt("D88 HAS UNSUPPORTED OR TRUNCATED RECORDS");
+    return false;
+  }
+  if (diskProfile === 2 && !hasIpl) {
+    stopAtIplPrompt("SPECIAL D88 REQUIRES IPL.ROM");
+    return false;
+  }
+  const wantRealIpl = hasIpl &&
+    (diskProfile === 2 ||
+     (!options.forceDummyIpl && (realIplEl.checked || requestedBootMode !== 0)));
   if (!drives[0] && !wantRealIpl) {
     stopAtIplPrompt("READY - NO DISK (INSERT D88, THEN PRESS IPL)");
     return false;
   }
-  if (drives[0]) pushVolume(0);
-  if (drives[1]) pushVolume(1);
   const ok = wantRealIpl ? Module._emu_boot_real_ipl()
                          : (drives[0] ? Module._emu_boot() : 0);
   if (!ok) {
-    stopAtIplPrompt("NOT A BOOTABLE DISK");
+    stopAtIplPrompt(wantRealIpl ? "REAL IPL DID NOT START" : "NOT A BOOTABLE DISK");
     return false;
   }
   applyAdpcmHostSettings();

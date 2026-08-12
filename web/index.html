@@ -7,9 +7,9 @@
      be served from cache after a rebuild -->
 <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
 <title>MZ-2500 Web Emulator</title>
-<meta name="description" content="SHARP MZ-2500／MZ-2000／MZ-80B互換モード対応のブラウザ版エミュレータ。同梱のNEKO CAN RUNデモも専用ボタンから起動できます。">
+<meta name="description" content="SHARP MZ-2500／MZ-2000／MZ-80B互換モード対応のブラウザ版エミュレータ。標準形式と特殊フォーマットのD88に対応します。">
 <meta property="og:title" content="MZ-2500 Web Emulator">
-<meta property="og:description" content="D88をブラウザ内に保存して使えるMZ-2500エミュレータ。同梱のNEKO CAN RUNデモも選択して起動できます。">
+<meta property="og:description" content="標準形式と特殊フォーマットのD88をブラウザ内に保存して使えるMZ-2500エミュレータ。">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2216%22 fill=%22%23101214%22/><path fill=%22%23d3b25c%22 d=%22M15 75V25h15l20 25 20-25h15v50H70V48L50 72 30 48v27z%22/></svg>">
 <link rel="stylesheet" href="style.css?v=__BUILD__">
@@ -44,6 +44,9 @@
         FDDベイへのドロップや交換アイコンでは、リセットせずディスクを交換できます。
         複数ボリューム入り D88 は自動分割され、ドライブ内の選択欄で切り替えられます。
         ディスクはこのブラウザ内に保存され、外部には送信されません。</p>
+      <p>標準形式に加えて、トラックごとにセクタ数、C/H/R/N、密度、物理順序が異なる
+        特殊フォーマットの D88 にも対応しています。IPLPRO互換でない D88 の起動には、
+        利用者所有の <code>ipl.rom</code> を ROMスロットへ登録してください。</p>
       <p>POWER ONでは、ユーザーが保存したD88があれば自動的に再挿入します。
         保存済みD88がなければ無ディスクで待機し、同梱デモを勝手に挿入しません。
         NEKOボタンで起動した同梱デモは保存済みD88を上書きしません。</p>

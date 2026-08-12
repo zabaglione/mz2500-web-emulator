@@ -880,7 +880,7 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
         fdc_.write((port & 0xFF) - 0xD8, static_cast<uint8_t>(~value), cpu_.cyc);
         return;
-    case 0xDC: fdc_.write_drive(value); return;
+    case 0xDC: fdc_.write_drive(value, cpu_.cyc); return;
     case 0xDD: fdc_.write_side(value); return;
     case 0xDE:
         fdc_.set_single_density((value & 0x01) != 0);

@@ -667,12 +667,25 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "cannot create blank disk\n");
         return 1;
     }
-    if (!disk_a.empty()) {
-        if (real_ipl) {
-            if (!machine.boot_with_real_ipl()) return 1;
-        } else if (!machine.boot_from_disk()) {
-            return 1;
+
+    auto boot_disk = [&]() -> bool {
+        const mz::Mz2500::DiskBootProfile profile = machine.disk_boot_profile(0);
+        if (profile == mz::Mz2500::DiskBootProfile::Invalid) {
+            std::fprintf(stderr, "D88 HAS UNSUPPORTED OR TRUNCATED RECORDS\n");
+            return false;
         }
+        if (real_ipl) return machine.boot_with_real_ipl();
+        if (profile == mz::Mz2500::DiskBootProfile::RealIplRequired) {
+            if (!machine.has_ipl_rom()) {
+                std::fprintf(stderr, "SPECIAL D88 REQUIRES IPL.ROM\n");
+                return false;
+            }
+            return machine.boot_with_real_ipl();
+        }
+        return machine.boot_from_disk();
+    };
+    if (!disk_a.empty()) {
+        if (!boot_disk()) return 1;
     }
 
     std::vector<int> trace_last(trace_addrs.size(), -1);
@@ -686,8 +699,7 @@ int main(int argc, char** argv) {
             // button does. Every other CLI run gets a machine straight from
             // its constructor, so this is the only way to test what a boot
             // does and does not carry over from the session before it.
-            const bool ok = real_ipl ? machine.boot_with_real_ipl()
-                                     : machine.boot_from_disk();
+            const bool ok = boot_disk();
             if (!ok) {
                 std::fprintf(stderr, "reboot at frame %ld failed\n", i);
                 return 1;
