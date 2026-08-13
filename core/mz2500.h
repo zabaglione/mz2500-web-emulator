@@ -693,6 +693,10 @@ private:
     uint8_t cpu_half_cycle_ = 0;
     uint64_t step_external_wait_ = 0;
     bool cpu_step_active_ = false;
+    // A hardware IPL starts the ROM before its RAM check has completed. Keep
+    // the immediate post-reset state observable, then apply that check just
+    // before the first emulated IPL frame executes.
+    bool real_ipl_ram_init_pending_ = false;
     int boot_delay_frames_ = DEFAULT_BOOT_DELAY_FRAMES;
     int idle_frames_remaining_ = 0;
     bool trace_boot_ = false;

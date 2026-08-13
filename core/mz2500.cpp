@@ -36,6 +36,7 @@ void Mz2500::system_reset() {
     cpu_half_cycle_ = 0;
     step_external_wait_ = 0;
     cpu_step_active_ = false;
+    real_ipl_ram_init_pending_ = false;
     idle_frames_remaining_ = 0;
 }
 
@@ -1353,6 +1354,14 @@ void Mz2500::run_frame() {
         if (!adpcm_present_) adpcm_.discard_audio();
     };
     seed_raster_lines();
+    if (real_ipl_ram_init_pending_) {
+        // The physical IPL performs its RAM test before it loads and starts
+        // the disk program. Applying it at the first frame preserves the
+        // reset boundary while preventing stale program RAM from leaking
+        // into a repeated IPL.
+        mem_.clear_main_ram();
+        real_ipl_ram_init_pending_ = false;
+    }
     if (idle_frames_remaining_ > 0) {
         // The real IPL ROM is "running" - burn the frame without touching RAM.
         // Audio time must still advance because the browser uses produced

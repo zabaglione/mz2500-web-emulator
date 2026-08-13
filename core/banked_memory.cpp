@@ -20,6 +20,11 @@ void BankedMemory::clear() {
     reset_control();
 }
 
+void BankedMemory::clear_main_ram() {
+    for (int bank = 0; bank < 0x20; bank++)
+        std::memset(phys_.data() + bank * BANK_SIZE, 0, BANK_SIZE);
+}
+
 void BankedMemory::load_ipl_rom(const uint8_t* data, size_t size) {
     if (size > 0x8000) size = 0x8000;
     std::memset(bank_ptr(0x34), 0xFF, 4 * BANK_SIZE);

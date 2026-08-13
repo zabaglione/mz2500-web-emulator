@@ -104,6 +104,7 @@ bool Mz2500::boot_from_disk() {
     }
 
     mem_.clear(); // native bootstrap policy: clear main RAM, VRAM, and PCG
+    real_ipl_ram_init_pending_ = false;
     reset_peripherals_for_boot();
 
     // The native bootstrap replaces firmware which programs the 8255 to
@@ -192,9 +193,10 @@ bool Mz2500::boot_with_real_ipl() {
         return false;
     }
 
-    // RESET changes the memory-controller latches, not RAM cells. The real
-    // IPL now gets to perform its own RAM test and optional GRAM/PCG setup;
-    // this also preserves the documented reset-without-GRAM-clear path.
+    // RESET changes the memory-controller latches, not RAM cells. Keep that
+    // immediate state observable; run_frame() applies the RAM-check effect
+    // before the first ROM frame, matching the point at which the real IPL
+    // has initialized main RAM while leaving GRAM/PCG separate.
     mem_.reset_control();
     reset_peripherals_for_boot();
 
@@ -223,6 +225,7 @@ bool Mz2500::boot_with_real_ipl() {
     frames_ = 0;
     cpu_half_cycle_ = 0;
     idle_frames_remaining_ = 0; // the real firmware takes its real time
+    real_ipl_ram_init_pending_ = true;
 
     if (trace_boot_) std::fprintf(stderr, "[ipl] real IPL boot, PC=0000h\n");
     return true;

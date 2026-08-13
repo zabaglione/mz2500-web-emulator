@@ -28,6 +28,10 @@ public:
     BankedMemory() : phys_(NUM_BANKS * BANK_SIZE, 0) {}
 
     void clear();
+    // The real IPL's RAM check initializes the main RAM before handing
+    // control to the boot program. Video RAM and PCG are separate storage
+    // and are intentionally not touched by this operation.
+    void clear_main_ram();
     void reset_control() {
         selector_ = 0;
         kanji_bank_ = 0;
