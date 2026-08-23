@@ -16,6 +16,17 @@ const MAX_STEPS_PER_TICK = 12; // catch-up bound after a stalled tab
 // KeyboardEvent.code -> [row, bit]; matches core/keyboard.h (I/O map key
 // matrix; SHIFT/'-'/';'/':' verified by typing into BASIC-M25 and reading
 // the echo). Punctuation follows the JIS layout the real machine uses.
+// Tenkey emulation: launching NEKO turns this on (and it persists), so
+// the browser's arrow keys press the numeric-pad matrix cells the game
+// reads for movement on the real machine's keyboard.
+let tenkeyEmulation = localStorage.getItem("mzw_tenkey_emu") === "1";
+const TENKEY_ARROWS = new Map([
+  ["ArrowUp", [1, 2]],      // pad 8
+  ["ArrowDown", [2, 2]],    // pad 2
+  ["ArrowLeft", [2, 4]],    // pad 4
+  ["ArrowRight", [2, 6]],   // pad 6
+]);
+
 const KEYMAP = new Map([
   ["Space", [3, 1]],
   ["Tab", [3, 0]],
@@ -2057,7 +2068,14 @@ async function iplBoot(options = {}) {
   // structurally valid D88 require the owner's real IPL ROM.
   const diskProfile = drives[0] ? Module._emu_disk_boot_profile(0) : 0;
   if (diskProfile === 3) {
-    stopAtIplPrompt("D88 HAS UNSUPPORTED OR TRUNCATED RECORDS");
+    const issue = Module._emu_disk_boot_issue(0);
+    const issueMessages = {
+      1: "D88 STRUCTURE IS INVALID",
+      2: "D88 HAS A SHORT SECTOR RECORD",
+      3: "D88 HAS AN UNSUPPORTED SECTOR SIZE",
+      4: "D88 TRACK EXCEEDS SUPPORTED CAPACITY",
+    };
+    stopAtIplPrompt(issueMessages[issue] || "D88 CANNOT BE USED BY THE FDC");
     return false;
   }
   if (diskProfile === 2 && !hasIpl) {
@@ -2259,6 +2277,10 @@ function loadNekoDemo() {
   // of an optional real IPL setting without changing that advanced setting.
   bootModeEl.value = "0";
   localStorage.setItem("mzw_boot_mode", "0");
+
+  // NEKO reads the numeric pad for movement; let the host arrows emulate it.
+  tenkeyEmulation = true;
+  localStorage.setItem("mzw_tenkey_emu", "1");
 
   nekoDemoPromise = (async () => {
     await ensurePowerOn();
@@ -2524,7 +2546,7 @@ function handleKey(e, down) {
   } else if (dir) {
     cursorHeld[dir] = down;
   }
-  const pos = KEYMAP.get(e.code);
+  const pos = (tenkeyEmulation && TENKEY_ARROWS.get(e.code)) || KEYMAP.get(e.code);
   if (pos) {
     setKey("phys", pos, down);
     e.preventDefault();

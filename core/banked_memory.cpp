@@ -9,6 +9,12 @@ namespace {
 bool is_rom_bank(int bank) {
     return (bank >= 0x34 && bank <= 0x37) || bank == 0x3A || (bank >= 0x3C && bank <= 0x3F);
 }
+
+int access_bank(int bank, bool expansion_ram, bool absent_main_ram_alias) {
+    if (!expansion_ram && absent_main_ram_alias && bank >= 0x10 && bank <= 0x1F)
+        return bank - 0x10;
+    return bank;
+}
 } // namespace
 
 void BankedMemory::clear() {
@@ -18,11 +24,20 @@ void BankedMemory::clear() {
             std::memset(phys_.data() + bank * BANK_SIZE, 0, BANK_SIZE);
     }
     reset_control();
+    if (test_main_ram_fill_enabled_)
+        fill_main_ram(test_main_ram_fill_value_);
 }
 
 void BankedMemory::clear_main_ram() {
     for (int bank = 0; bank < 0x20; bank++)
         std::memset(phys_.data() + bank * BANK_SIZE, 0, BANK_SIZE);
+    if (test_main_ram_fill_enabled_)
+        fill_main_ram(test_main_ram_fill_value_);
+}
+
+void BankedMemory::fill_main_ram(uint8_t value) {
+    for (int bank = 0; bank < 0x20; bank++)
+        std::memset(phys_.data() + bank * BANK_SIZE, value, BANK_SIZE);
 }
 
 void BankedMemory::load_ipl_rom(const uint8_t* data, size_t size) {
@@ -33,7 +48,7 @@ void BankedMemory::load_ipl_rom(const uint8_t* data, size_t size) {
 }
 
 uint8_t BankedMemory::read(uint16_t addr) {
-    const int bank = map_[addr >> 13];
+    int bank = map_[addr >> 13];
     // Bank 39h holds the four PCG planes at 2KB each. Port CFh bit7 swaps
     // the first of them - PCG 0 - for a 2KB window onto the kanji ROM, with
     // CFh bits 6-0 choosing which of its 128 blocks shows through. PCG 1-3
@@ -66,6 +81,7 @@ uint8_t BankedMemory::read(uint16_t addr) {
         return 0xFF;
     }
     if (bank_absent(bank)) return 0xFF;
+    bank = access_bank(bank, expansion_ram_, absent_main_ram_alias_);
     return phys_[bank * BANK_SIZE + (addr & 0x1FFF)];
 }
 
@@ -84,6 +100,7 @@ void BankedMemory::write(uint16_t addr, uint8_t value) {
         return;
     }
     if (bank_absent(bank)) return;
+    bank = access_bank(bank, expansion_ram_, absent_main_ram_alias_);
     phys_[bank * BANK_SIZE + (addr & 0x1FFF)] = value;
 }
 

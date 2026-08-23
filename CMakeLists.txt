@@ -72,6 +72,78 @@ else()
   set_tests_properties(disk_io PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+  find_program(Z80ASM_EXECUTABLE z80asm)
+  if(Z80ASM_EXECUTABLE)
+    set(FDC_DRIVER_HARNESS_BIN
+      ${CMAKE_CURRENT_BINARY_DIR}/fdc_driver_harness.bin)
+    set(FDC_HIL_HARNESS_BIN
+      ${CMAKE_CURRENT_BINARY_DIR}/fdc_hil_harness.bin)
+    set(FDC_BATCH_HARNESS_BIN
+      ${CMAKE_CURRENT_BINARY_DIR}/fdc_batch_harness.bin)
+    set(MZSD_FDC_LOADER_HARNESS_BIN
+      ${CMAKE_CURRENT_BINARY_DIR}/mzsd_fdc_loader_harness.bin)
+    add_custom_command(
+      OUTPUT ${FDC_DRIVER_HARNESS_BIN}
+      COMMAND ${Z80ASM_EXECUTABLE}
+        -I ${CMAKE_CURRENT_SOURCE_DIR}/..
+        -o ${FDC_DRIVER_HARNESS_BIN}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_driver_harness.asm
+      DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_driver_harness.asm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_driver.inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_protocol.inc
+      VERBATIM)
+    add_custom_command(
+      OUTPUT ${FDC_HIL_HARNESS_BIN}
+      COMMAND ${Z80ASM_EXECUTABLE}
+        -I ${CMAKE_CURRENT_SOURCE_DIR}/..
+        -o ${FDC_HIL_HARNESS_BIN}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_hil_harness.asm
+      DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_hil_harness.asm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/remote_monitor_fdc_hil.inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_driver.inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_protocol.inc
+      VERBATIM)
+    add_custom_command(
+      OUTPUT ${FDC_BATCH_HARNESS_BIN}
+      COMMAND ${Z80ASM_EXECUTABLE}
+        -I ${CMAKE_CURRENT_SOURCE_DIR}/..
+        -o ${FDC_BATCH_HARNESS_BIN}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_batch_harness.asm
+      DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/fdc_batch_harness.asm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/remote_monitor_fdc_batch.inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_driver.inc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/fdc/z80/fdc_protocol.inc
+      VERBATIM)
+    add_custom_command(
+      OUTPUT ${MZSD_FDC_LOADER_HARNESS_BIN}
+      COMMAND ${Z80ASM_EXECUTABLE}
+        -I ${CMAKE_CURRENT_SOURCE_DIR}/..
+        -o ${MZSD_FDC_LOADER_HARNESS_BIN}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/mzsd_fdc_loader_harness.asm
+      DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/z80/mzsd_fdc_loader_harness.asm
+        ${CMAKE_CURRENT_SOURCE_DIR}/../shared/mz2500/audio/z80/mzsd_fdc_loader.inc
+      VERBATIM)
+    add_custom_target(z80_fdc_driver_harness
+      DEPENDS
+        ${FDC_DRIVER_HARNESS_BIN}
+        ${FDC_HIL_HARNESS_BIN}
+        ${FDC_BATCH_HARNESS_BIN}
+        ${MZSD_FDC_LOADER_HARNESS_BIN})
+    add_executable(test_z80_fdc_driver tests/unit/test_z80_fdc_driver.cpp)
+    add_dependencies(test_z80_fdc_driver z80_fdc_driver_harness)
+    target_link_libraries(test_z80_fdc_driver PRIVATE mz2500_core)
+    add_test(NAME z80_fdc_driver
+      COMMAND test_z80_fdc_driver
+        ${FDC_DRIVER_HARNESS_BIN}
+        ${FDC_HIL_HARNESS_BIN}
+        ${FDC_BATCH_HARNESS_BIN}
+        ${MZSD_FDC_LOADER_HARNESS_BIN})
+  endif()
+
   add_executable(test_keyboard tests/unit/test_keyboard.cpp)
   target_link_libraries(test_keyboard PRIVATE mz2500_core)
   add_test(NAME keyboard COMMAND test_keyboard)

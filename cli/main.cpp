@@ -4,6 +4,7 @@
 // (shared/mz2500/emulators/emuz_macos/main.cpp) so the existing verification
 // scripts can drive both emulators with the same pulse sequences.
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -21,6 +22,22 @@ extern "C" {
 #include "ymfm/ymfm_opn.h"
 
 namespace {
+
+bool parse_hex_byte(const char* text, uint8_t& value) {
+    if (!text || *text == '\0') return false;
+    const char* digits = text;
+    if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) digits += 2;
+    const size_t length = std::strlen(digits);
+    if (length == 0 || length > 2) return false;
+    for (size_t i = 0; i < length; i++) {
+        if (!std::isxdigit(static_cast<unsigned char>(digits[i]))) return false;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(digits, &end, 16);
+    if (end != digits + length || parsed > 0xFF) return false;
+    value = static_cast<uint8_t>(parsed);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // P0 selftest: prove the vendored Z80 core (with the 16-bit I/O address
@@ -188,8 +205,20 @@ void usage() {
         "  --disk-b-blank        put an unformatted blank disk in drive 1 (FD2)\n"
         "  --disk-save N:PATH    write drive N's image out at exit (write tests)\n"
         "  --frames N            run N emulated frames (default 600)\n"
+        "  --ram-fill BYTE       test-only fill main RAM 00h-1Fh before disk boot (hex)\n  --no-pit              test-only: mute the 8253 ch0 interrupt (real-HW mimic)\n"
         "  --trace-boot          log dummy-IPL and boot progress\n"
+        "  --strict-gcrtc        report SuperMZ G-CRTC writes outside VBLANK\n"
         "  --cpu-report          print CPU state at exit\n"
+        "  --crtc-report         print TEXT CRTC f6/f7/$00-0a/$0f at exit\n"
+        "  --stack-report        measure runtime SP and writes below CFB0h\n"
+        "  --stack-guard ADDR   override stack guard (hex, default CFB0)\n"
+        "  --stack-code-floor ADDR\n"
+                        "                        adjacent code write floor (default CD10)\n"
+        "  --stack-data-floor ADDR\n"
+        "                        mutable blob data floor (default CF9E)\n"
+        "  --stack-entry-pc ADDR\n"
+        "                        start measurement at this runtime PC (default D000)\n"
+        "  --stack-isr-pc ADDR  ISR entry PC for the nested-stack report (default ECDD)\n"
         "  --stall-profile FRAME profile VRAM waits by instruction from FRAME on\n"
         "  --stall-top N         sites the stall profile lists (default 20)\n"
         "  --sprite-cells        per frame, count text cells holding a sprite code\n"
@@ -198,6 +227,10 @@ void usage() {
         "  --trace-memory ADDR   log every frame where memory[ADDR] changes\n"
         "  --boot-delay N        override IPL boot delay in frames (calibration)\n"
         "  --fdc-latency-us N    override FDC per-read latency (calibration)\n"
+        "  --fdc-require-settle-at N\n"
+        "                        require E after head motion from frame N\n"
+        "  --fdc-read-fault N[:once|persistent]\n"
+        "                        inject a deterministic READ failure for FDC tests\n"
         "  --screenshot PATH     write the final frame as a 640x400 PPM (P6)\n"
         "  --frame-dump D:S:E    write every frame in [S,E] as D/frameNNNNNN.ppm\n"
         "  --reboot-at N         reboot the same machine at frame N (the web\n"
@@ -217,7 +250,11 @@ void usage() {
         "  --audio-range S:E     restrict the WAV to frames [S,E)\n"
         "  --trace-opn PATH      log every OPN register write as cycle,reg,value\n"
         "  --no-adpcm            remove the MZ-1E35 ADPCM board (ports 98h/99h)\n"
-        "  --no-emm              remove the MZ-1R37 640K EMM (ports ACh/ADh)\n");
+        "  --no-emm              remove the MZ-1R37 640K EMM (ports ACh/ADh)\n"
+        "  --no-exp-ram-alias    diagnostic: mirror absent 10h-1Fh onto 00h-0Fh\n"
+        "  --boot-mode N         rear-panel MODE selector: 0=MZ-2500 (default),\n"
+        "                        1=MZ-2000, 2=MZ-80B (legacy modes need --rom-dir\n"
+        "                        with ipl.rom/kanji.rom and imply --real-ipl)\n");
 }
 
 // Render the current frame to a 640x400 binary PPM. Shared by --screenshot
@@ -246,7 +283,15 @@ int main(int argc, char** argv) {
     std::string disk_save_path;
     long frames = 600;
     bool trace_boot = false;
+    bool strict_gcrtc = false;
     bool cpu_report = false;
+    bool crtc_report = false;
+    bool stack_report = false;
+    long stack_guard = 0xCFB0;
+    long stack_code_floor = 0xCD10;
+    long stack_data_floor = 0xCF9E;
+    long stack_entry_pc = 0xD000;
+    long stack_isr_pc = 0xECDD;
     long stall_profile_from = -1; // frame the VRAM wait profiler starts at
     int stall_top = 20;           // sites listed in its report
     bool sprite_cells = false;    // per-frame count of text cells >= 128
@@ -256,6 +301,9 @@ int main(int argc, char** argv) {
     long reboot_at = -1;
     long fdc_latency_us = -1;
     long fdc_step_us = -1;
+    long fdc_require_settle_at = -1;
+    long fdc_read_fault_at = -1;
+    bool fdc_read_fault_persistent = false;
     bool fdc_stats = false;
     std::string screenshot_path;
     std::string frame_dump_dir;
@@ -266,7 +314,14 @@ int main(int argc, char** argv) {
     long fm_lpf_hz = -1;
     std::string rom_dir;
     bool real_ipl = false;
-    bool no_exp_ram = false, no_exp_gram = false, no_mz1m10 = false;
+    long boot_mode = 0;
+    bool ram_random_set = false;
+    bool no_pit = false;
+    uint32_t ram_random_seed = 1;
+    bool ram_fill_set = false;
+    uint8_t ram_fill_value = 0;
+    bool no_exp_ram = false, no_exp_ram_alias = false;
+    bool no_exp_gram = false, no_mz1m10 = false;
     bool no_adpcm = false, no_emm = false;
     long trace_trap = -1;
     bool trace_io = false;
@@ -354,10 +409,51 @@ int main(int argc, char** argv) {
             const char* v = value();
             if (!v) { usage(); return 2; }
             frames = std::strtol(v, nullptr, 10);
+        } else if (arg == "--no-pit") {
+            no_pit = true;
+        } else if (arg == "--ram-random") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            ram_random_seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            ram_random_set = true;
+        } else if (arg == "--ram-fill") {
+            const char* v = value();
+            if (!v || !parse_hex_byte(v, ram_fill_value)) {
+                std::fprintf(stderr,
+                             "--ram-fill expects one hexadecimal byte in the range 00-FF\n");
+                return 2;
+            }
+            ram_fill_set = true;
         } else if (arg == "--trace-boot") {
             trace_boot = true;
+        } else if (arg == "--strict-gcrtc") {
+            strict_gcrtc = true;
         } else if (arg == "--cpu-report") {
             cpu_report = true;
+        } else if (arg == "--crtc-report") {
+            crtc_report = true;
+        } else if (arg == "--stack-report") {
+            stack_report = true;
+        } else if (arg == "--stack-guard") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            stack_guard = std::strtol(v, nullptr, 16);
+        } else if (arg == "--stack-code-floor") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            stack_code_floor = std::strtol(v, nullptr, 16);
+        } else if (arg == "--stack-data-floor") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            stack_data_floor = std::strtol(v, nullptr, 16);
+        } else if (arg == "--stack-entry-pc") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            stack_entry_pc = std::strtol(v, nullptr, 16);
+        } else if (arg == "--stack-isr-pc") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            stack_isr_pc = std::strtol(v, nullptr, 16);
         } else if (arg == "--stall-profile") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -399,6 +495,42 @@ int main(int argc, char** argv) {
             const char* v = value();
             if (!v) { usage(); return 2; }
             fdc_step_us = std::strtol(v, nullptr, 10);
+        } else if (arg == "--fdc-require-settle-at") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            fdc_require_settle_at = std::strtol(v, nullptr, 10);
+        } else if (arg == "--fdc-read-fault") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            const std::string spec = v;
+            const size_t colon = spec.find(':');
+            const std::string count_str = spec.substr(0, colon);
+            char* count_end = nullptr;
+            const long count = count_str.empty()
+                                   ? -1
+                                   : std::strtol(count_str.c_str(), &count_end, 10);
+            if (count_str.empty() || count_end != count_str.c_str() + count_str.size() ||
+                count <= 0) {
+                std::fprintf(stderr,
+                             "--fdc-read-fault wants a positive READ command number "
+                             "(got '%s')\n",
+                             count_str.c_str());
+                return 2;
+            }
+            bool persistent = false;
+            if (colon != std::string::npos) {
+                const std::string mode = spec.substr(colon + 1);
+                if (mode == "persistent") persistent = true;
+                else if (mode != "once") {
+                    std::fprintf(stderr,
+                                 "--fdc-read-fault mode must be once or persistent "
+                                 "(got '%s')\n",
+                                 mode.c_str());
+                    return 2;
+                }
+            }
+            fdc_read_fault_at = count;
+            fdc_read_fault_persistent = persistent;
         } else if (arg == "--fdc-stats") {
             fdc_stats = true;
         } else if (arg == "--screenshot") {
@@ -556,6 +688,15 @@ int main(int argc, char** argv) {
             rom_dir = v;
         } else if (arg == "--real-ipl") {
             real_ipl = true;
+        } else if (arg == "--boot-mode") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            boot_mode = std::strtol(v, nullptr, 10);
+            if (boot_mode < 0 || boot_mode > 2) {
+                std::fprintf(stderr, "--boot-mode wants 0 (MZ-2500), 1 (MZ-2000) or 2 (MZ-80B)\n");
+                return 2;
+            }
+            if (boot_mode != 0) real_ipl = true;
         } else if (arg == "--reboot-at") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -582,6 +723,8 @@ int main(int argc, char** argv) {
             trace_trap = std::strtol(v, nullptr, 16);
         } else if (arg == "--no-exp-ram") {
             no_exp_ram = true;
+        } else if (arg == "--no-exp-ram-alias") {
+            no_exp_ram_alias = true;
         } else if (arg == "--no-exp-gram") {
             no_exp_gram = true;
         } else if (arg == "--no-mz1m10") {
@@ -625,7 +768,19 @@ int main(int argc, char** argv) {
     }
 
     mz::Mz2500 machine;
+    machine.set_boot_mode(static_cast<int>(boot_mode));
+    if (ram_random_set) machine.set_test_ram_random(ram_random_seed);
+    if (no_pit) machine.set_test_pit_mute();
+    if (ram_fill_set) machine.set_test_ram_fill(ram_fill_value);
     machine.set_trace_boot(trace_boot);
+    machine.set_strict_gcrtc(strict_gcrtc);
+    if (stack_report) {
+        machine.set_stack_diagnostics(true, static_cast<uint16_t>(stack_guard),
+                                      static_cast<uint16_t>(stack_entry_pc),
+                                      static_cast<uint16_t>(stack_isr_pc),
+                                      static_cast<uint16_t>(stack_code_floor),
+                                      static_cast<uint16_t>(stack_data_floor));
+    }
     FILE* trace_opn = nullptr;
     if (!trace_opn_path.empty()) {
         trace_opn = std::fopen(trace_opn_path.c_str(), "w");
@@ -635,11 +790,16 @@ int main(int argc, char** argv) {
     if (boot_delay >= 0) machine.set_boot_delay_frames(static_cast<int>(boot_delay));
     if (fdc_latency_us >= 0) machine.fdc().set_read_latency_us(static_cast<uint32_t>(fdc_latency_us));
     if (fdc_step_us >= 0) machine.fdc().set_step_time_us(static_cast<uint32_t>(fdc_step_us));
+    if (fdc_read_fault_at > 0) {
+        machine.fdc().set_read_fault(static_cast<uint64_t>(fdc_read_fault_at),
+                                     fdc_read_fault_persistent);
+    }
     if (mute_fm || mute_ssg) machine.opn().set_layer_gains(mute_fm ? 0.f : 1.f, mute_ssg ? 0.f : 1.f);
     if (fm_lpf_hz >= 0) machine.opn().set_fm_lowpass_hz(static_cast<uint32_t>(fm_lpf_hz));
     if (trace_trap >= 0) machine.set_trap_watch((uint16_t)trace_trap);
     if (trace_io) machine.set_trace_io(true);
-    if (no_exp_ram) machine.set_hw_option(0, false);
+    if (no_exp_ram || no_exp_ram_alias) machine.set_hw_option(0, false);
+    if (no_exp_ram_alias) machine.memory().set_absent_main_ram_alias(true);
     if (no_exp_gram) machine.set_hw_option(1, false);
     if (no_mz1m10) machine.set_hw_option(2, false);
     if (no_adpcm) machine.set_hw_option(3, false);
@@ -694,6 +854,8 @@ int main(int argc, char** argv) {
     // iterations so we only issue set_key() on an actual transition.
     std::vector<mz::KeyPos> held_keys;
     for (long i = 0; i < frames; i++) {
+        if (i == fdc_require_settle_at)
+            machine.fdc().set_require_explicit_head_settle(true);
         if (i == reboot_at) {
             // Reboot the SAME machine, the way the web front end's RESET
             // button does. Every other CLI run gets a machine straight from
@@ -792,10 +954,91 @@ int main(int argc, char** argv) {
     if (cpu_report) {
         const z80& c = machine.cpu();
         std::printf("cpu: pc=%04x sp=%04x a=%02x bc=%04x de=%04x hl=%04x "
-                    "halted=%d iff1=%d im=%d cycles=%llu\n",
+                    "halted=%d iff1=%d im=%d i=%02x cycles=%llu\n",
                     c.pc, c.sp, c.a, (c.b << 8) | c.c, (c.d << 8) | c.e,
                     (c.h << 8) | c.l, c.halted, c.iff1, c.interrupt_mode,
-                    static_cast<unsigned long long>(machine.cycles()));
+                    c.i, static_cast<unsigned long long>(machine.cycles()));
+    }
+    if (crtc_report) {
+        std::printf("crtc: f6=%02x f7=%02x $00=%02x $01=%02x $02=%02x "
+                    "$03=%02x $05=%02x $07=%02x $08=%02x $09=%02x $0a=%02x "
+                    "$0f=%02x(200raster=%d mod=%u) | gde$0e=%02x(v200=%d "
+                    "h640=%d 4c=%d)\n",
+                    machine.text_cg_mask(), machine.text_font_size(),
+                    machine.text_crtc_reg(0x00), machine.text_crtc_reg(0x01),
+                    machine.text_crtc_reg(0x02), machine.text_crtc_reg(0x03),
+                    machine.text_crtc_reg(0x05), machine.text_crtc_reg(0x07),
+                    machine.text_crtc_reg(0x08), machine.text_crtc_reg(0x09),
+                    machine.text_crtc_reg(0x0a), machine.text_crtc_reg(0x0f),
+                    (machine.text_crtc_reg(0x0f) & 0x08) ? 1 : 0,
+                    machine.text_crtc_reg(0x0f) & 0x03,
+                    machine.test_gde_reg(0x0e),
+                    (machine.test_gde_reg(0x0e) & 0x04) ? 1 : 0,
+                    (machine.test_gde_reg(0x0e) & 0x02) ? 1 : 0,
+                    (machine.test_gde_reg(0x0e) & 0x10) ? 0 : 1);
+        std::printf("palette:");
+        int armed = 0, bare = 0;
+        for (int e = 0; e < 16; e++) {
+            const uint8_t v = machine.text_crtc_reg(0x80 + e);
+            std::printf(" %x=%02x%s", e, v, (v & 0x10) ? "*" : "");
+            if (v & 0x10) armed++; else bare++;
+        }
+        std::printf(" | armed=%d bare=%d\n", armed, bare);
+        const uint8_t* opn = machine.opn_reg_shadow();
+        std::printf("opn: $07=%02x(ioa_out=%d iob_out=%d) $0e=%02x"
+                    "(plten=%d drsel=%d) $0f=%02x(laster=%s mode2000=%s "
+                    "mode80b=%s)\n",
+                    opn[0x07], (opn[0x07] & 0x40) ? 1 : 0,
+                    (opn[0x07] & 0x80) ? 1 : 0,
+                    opn[0x0e],
+                    (opn[0x0e] & 0x04) ? 1 : 0, (opn[0x0e] & 0x02) ? 1 : 0,
+                    opn[0x0f],
+                    (opn[0x0f] & 0x40) ? "H(200)" : "L(400)",
+                    (opn[0x0f] & 0x10) ? "H" : "L(2000)",
+                    (opn[0x0f] & 0x20) ? "H" : "L(80B)");
+    }
+    if (stack_report) {
+        const mz::Mz2500::StackDiagnostics& s = machine.stack_diagnostics();
+        const bool red = !s.entry_seen || s.min_sp < s.guard ||
+                         s.stack_pointer_writes_below_guard != 0 ||
+                         s.writes_into_adjacent_code != 0;
+        std::printf("stack: entry_seen=%d entry_pc=%04x guard=%04x instructions=%llu "
+                    "sp_samples=%llu min_sp=%04x min_sp_pc=%04x "
+                    "min_sp_before=%04x min_sp_before_pc=%04x "
+                    "min_sp_after=%04x min_sp_after_pc=%04x verdict=%s\n",
+                    s.entry_seen ? 1 : 0, s.entry_pc, s.guard,
+                    (unsigned long long)s.instructions,
+                    (unsigned long long)s.sp_samples, s.min_sp, s.min_sp_pc,
+                    s.min_sp_before, s.min_sp_before_pc,
+                    s.min_sp_after, s.min_sp_after_pc, red ? "RED" : "GREEN");
+        std::printf("stack: isr_entry=%04x isr_samples=%llu isr_min_sp=%04x "
+                    "isr_min_sp_pc=%04x isr_active=%d\n",
+                    s.isr_entry, (unsigned long long)s.isr_samples,
+                    s.isr_min_sp, s.isr_min_sp_pc, s.isr_active ? 1 : 0);
+        std::printf("stack: writes_below_guard=%llu writes_into_adjacent_blob=%llu "
+                    "writes_into_adjacent_code=%llu "
+                    "writes_while_sp_below_guard=%llu "
+                    "stack_pointer_writes_below_guard=%llu\n",
+                    (unsigned long long)s.writes_below_guard,
+                    (unsigned long long)s.writes_into_adjacent_blob,
+                    (unsigned long long)s.writes_into_adjacent_code,
+                    (unsigned long long)s.writes_while_sp_below_guard,
+                    (unsigned long long)s.stack_pointer_writes_below_guard);
+        if (s.writes_below_guard != 0) {
+            std::printf("stack: first_write_below_guard addr=%04x pc=%04x sp=%04x\n",
+                        s.first_write_addr, s.first_write_pc, s.first_write_sp);
+        }
+        if (s.stack_pointer_writes_below_guard != 0) {
+            std::printf("stack: first_pointer_write_below_guard addr=%04x pc=%04x sp=%04x\n",
+                        s.first_pointer_write_addr, s.first_pointer_write_pc,
+                        s.first_pointer_write_sp);
+        }
+        if (s.writes_into_adjacent_code != 0) {
+            std::printf("stack: first_adjacent_code_write addr=%04x pc=%04x sp=%04x\n",
+                        s.first_adjacent_code_write_addr,
+                        s.first_adjacent_code_write_pc,
+                        s.first_adjacent_code_write_sp);
+        }
     }
     for (uint16_t addr : memory_reports) {
         std::printf("memory[%04x]=%02x\n", addr, machine.read_memory(addr));
@@ -860,10 +1103,31 @@ int main(int argc, char** argv) {
                     over_mean / mz::CYCLES_PER_FRAME);
     }
     if (fdc_stats) {
-        std::printf("fdc: reads=%llu seeks=%llu steps=%llu\n",
+        std::printf("fdc: reads=%llu read_successes=%llu first_drqs=%llu "
+                    "max_first_drq_cycles=%llu max_first_drq_revs=%.6f "
+                    "sequential_gaps=%llu max_sequential_gap_cycles=%llu "
+                    "max_sequential_gap_revs=%.6f seeks=%llu steps=%llu "
+                    "physical_cylinder=%d track_register=%u side=%d faults=%llu\n",
                     (unsigned long long)machine.fdc().stat_reads,
+                    (unsigned long long)machine.fdc().stat_read_successes,
+                    (unsigned long long)machine.fdc().stat_read_first_drqs,
+                    (unsigned long long)machine.fdc().stat_read_max_first_drq_cycles,
+                    (double)machine.fdc().stat_read_max_first_drq_cycles /
+                        (double)mz::FdcMb8877::CYC_PER_REV,
+                    (unsigned long long)machine.fdc().stat_read_sequential_gaps,
+                    (unsigned long long)machine.fdc().stat_read_max_sequential_gap_cycles,
+                    (double)machine.fdc().stat_read_max_sequential_gap_cycles /
+                        (double)mz::FdcMb8877::CYC_PER_REV,
                     (unsigned long long)machine.fdc().stat_seeks,
-                    (unsigned long long)machine.fdc().stat_steps);
+                    (unsigned long long)machine.fdc().stat_steps,
+                    machine.fdc().physical_cylinder(),
+                    static_cast<unsigned>(machine.fdc().track_register()),
+                    machine.fdc().selected_side(),
+                    (unsigned long long)machine.fdc().read_fault_count());
+    }
+    if (strict_gcrtc) {
+        std::printf("gcrtc: strict=1 vblank_violations=%llu\n",
+                    (unsigned long long)machine.gde_vblank_violations());
     }
     if (disk_save_drive >= 0 && !disk_save_path.empty()) {
         const std::vector<uint8_t> image = machine.disk_image(disk_save_drive);

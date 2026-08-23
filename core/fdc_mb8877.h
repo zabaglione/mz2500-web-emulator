@@ -1,6 +1,5 @@
-// MB8877 floppy disk controller — the subset the NEKO CAN RUN boot chain
-// uses: RESTORE, SEEK, STEP/STEP-IN/STEP-OUT, single READ SECTOR, polled
-// BUSY/DRQ status.
+// MB8877 floppy disk controller model for Type I-IV commands used by the
+// MZ-2500 core.
 //
 // Two drives are wired (port DCh selects; each drive keeps its own head
 // position). Register values through this interface are LOGICAL chip
@@ -12,17 +11,11 @@
 // re-looked-up on every byte so a hot disk swap can never leave a
 // dangling pointer.
 //
-// Timing is a coarse model in CPU cycles (6 MHz): 32 us per MFM data byte
-// (250 kbps) or 64 us per FM byte (125 kbps), plus fixed per-READ and
-// per-seek-step latencies
-// calibrated black-box against EmuZ-2500 so the game's load-driven state
-// transitions land on the same frame numbers. Late data-register reads
-// never lose data, which is lenient vs. real hardware but safe for
-// polled loaders -- except when the host goes fully quiet on the data
-// register for a whole sector's transfer time during an active READ/WRITE
-// SECTOR, in which case the real-time fallback (advance_read_realtime()/
-// advance_write_realtime() in the .cpp) completes the transfer on its own
-// and does set LOST DATA, same as real hardware would.
+// Timing is represented in 6 MHz CPU cycles. Disk bytes continue to arrive
+// at 32 us (MFM) or 64 us (FM) intervals whether or not the CPU services
+// DRQ. The one-byte data register therefore loses a newly arriving read
+// byte when still full; write requests substitute zero when missed, except
+// that an unserviced first WRITE SECTOR request terminates the command.
 #pragma once
 
 #include <cstdint>
@@ -41,7 +34,7 @@ public:
     static constexpr uint64_t CYC_PER_BYTE = CYC_PER_BYTE_MFM;
     static constexpr uint64_t CYC_PER_REV = 1'200'000;  // 200 ms (300 rpm)
     static constexpr uint64_t CYC_INDEX_PULSE = 6'000;  // 1 ms index hole
-    static constexpr uint64_t CYC_PER_STEP = 18'000;    // 3 ms
+    static constexpr uint64_t CYC_TYPE1_SETTLE = 180'000; // 30 ms at 1 MHz CLK
 
     // Status bits. The chip reuses the same byte for two meanings: bits 1-5
     // read one way after a Type I command (seek family) and another after a
@@ -69,61 +62,128 @@ public:
     // reg: 0=status/command, 1=track, 2=sector, 3=data
     uint8_t read(int reg, uint64_t now);
     void write(int reg, uint8_t value, uint64_t now);
+    // INTRQ is modelled at the controller boundary. MZ CPU wiring remains a
+    // separate board-level concern; callers may sample the pin explicitly.
+    bool interrupt_request(uint64_t now);
 
-    void write_drive(uint8_t value, uint64_t now = 0); // port DCh (bit7 motor, low bits drive)
-    void write_side(uint8_t value);  // port DDh
+    void write_drive(uint8_t value, uint64_t now = 0); // DCh: D7 motor, D2 enable, D1:D0 number
+    void write_side(uint8_t value, uint64_t now = 0);  // port DDh
+    void set_internal_drive_bank(bool high, uint64_t now = 0);
     void set_single_density(bool single) { single_density_ = single; }
     bool single_density() const { return single_density_; }
+    // HLT is an external input. The MZ integration currently holds it true;
+    // tests and future board wiring can drive the input explicitly.
+    void set_head_load_timing(bool high, uint64_t now = 0) {
+        head_load_timing_ = high;
+        if (high) head_load_timing_since_ = now;
+    }
+    bool head_load_timing() const { return head_load_timing_; }
 
     bool motor_on() const { return motor_; }
+    bool drive_selected() const {
+        return drive_select_enabled_ && drive_mapped_;
+    }
     int selected_drive() const { return drive_; }
+    int raw_drive_number() const { return raw_drive_number_; }
+    bool drive_mapped() const { return drive_mapped_; }
     // access-lamp bitmask, bit n = drive n LED (motor + drive select)
-    uint8_t lamp_mask() const { return motor_ ? (uint8_t)(1 << drive_) : 0; }
+    uint8_t lamp_mask() const {
+        return motor_ && drive_select_enabled_ && drive_mapped_
+            ? static_cast<uint8_t>(1 << drive_) : 0;
+    }
     int physical_cylinder() const { return phys_cyl_[drive_]; }
 
     // pre-data latency per READ SECTOR command (ID search, gaps); calibration knob
     void set_read_latency_us(uint32_t us) { read_latency_cycles_ = (uint64_t)us * 6; }
     uint32_t read_latency_us() const { return (uint32_t)(read_latency_cycles_ / 6); }
-    void set_step_time_us(uint32_t us) { step_cycles_ = (uint64_t)us * 6; }
+    // Calibration override used by the CLI. Zero restores the documented
+    // 1 MHz rates (6/12/20/30 ms selected by command bits r1:r0).
+    void set_step_time_us(uint32_t us) {
+        step_override_cycles_ = (uint64_t)us * 6;
+    }
+
+    // Diagnostic compatibility gate for real-media loader testing. Real
+    // MZ-2500 observations showed that the first READ SECTOR immediately
+    // after radial head motion or a side change must request the Type-II E
+    // delay. The ordinary emulator remains permissive; the CLI can enable
+    // this gate to make missing settle requests deterministic before a disk
+    // is taken back to real hardware.
+    void set_require_explicit_head_settle(bool required) {
+        require_explicit_head_settle_ = required;
+    }
 
     // access-pattern counters for timing calibration
     uint64_t stat_reads = 0;
     uint64_t stat_seeks = 0;
     uint64_t stat_steps = 0;
+    uint64_t stat_read_successes = 0;
+    uint64_t stat_read_first_drqs = 0;
+    uint64_t stat_read_max_first_drq_cycles = 0;
+    uint64_t stat_read_sequential_gaps = 0;
+    uint64_t stat_read_max_sequential_gap_cycles = 0;
+
+    // Deterministic test-only fault injection. The command number is counted
+    // over READ SECTOR commands, not individual bytes or retries.
+    void set_read_fault(uint64_t command, bool persistent) {
+        read_fault_command_ = command;
+        read_fault_persistent_ = persistent;
+        read_fault_used_ = false;
+        read_fault_count_ = 0;
+        read_fault_active_ = false;
+    }
+    uint64_t read_fault_count() const { return read_fault_count_; }
+    uint8_t track_register() const { return track_reg_; }
+    int selected_side() const { return side_; }
 
 private:
     enum class State { Idle, TypeI, Read, Write, ReadAddr, WriteTrack, ReadTrack };
+    enum class StatusClass { TypeI, Read, Write };
 
     uint8_t status_at(uint64_t now);
-    bool index_pulse(uint64_t now) const {
-        return last_type1_ && motor_ && index_origin_valid_ && now >= index_origin_ &&
+    bool raw_index_pulse(uint64_t now) const {
+        return selected_drive_ready() && index_origin_valid_ &&
+               now >= index_origin_ &&
                ((now - index_origin_) % CYC_PER_REV) < CYC_INDEX_PULSE;
     }
-    // Real MB8877 hardware is clocked by the rotating disk, not by whether
-    // the CPU (or a DMA channel) ever reads/writes a byte through the data
-    // register: bytes arrive and depart on schedule regardless, and one the
-    // host never picks up (or supplies) in time is simply lost -- LOST DATA
-    // -- not a reason for BUSY to hang forever. Some firmware issues a
-    // multi-sector command purely to watch the sector register catch up to
-    // a target value and never touches the data register at all, so
-    // completion has to be driven by elapsed time here, exactly as it would
-    // be driven by the spinning platter on real hardware, not solely by how
-    // many bytes the CPU has explicitly moved through register 3.
+    bool index_pulse(uint64_t now) const {
+        return status_class_ == StatusClass::TypeI && raw_index_pulse(now);
+    }
     void advance_read_realtime(uint64_t now);
     void advance_write_realtime(uint64_t now);
-    // Same quiet-window idea as advance_read_realtime()/advance_write_realtime()
-    // above, for the three Type II/III commands that have no CPU-driven
-    // multi-record walk to fall back on at all: a driver that issues one of
-    // these and then polls status/other registers without ever touching
-    // register 3 would otherwise spin BUSY forever, exactly the failure mode
-    // that hung the format utility for READ/WRITE SECTOR before those two
-    // gained their fallback. Each treats its own whole transfer (the 6-byte
-    // ID field; the track stream) as the "record" whose worth of quiet time
-    // completes the command, since none of these three has a smaller
-    // sub-record unit to repeat between the way multi-sector read/write do.
     void advance_readaddr_realtime(uint64_t now);
     void advance_writetrack_realtime(uint64_t now);
     void advance_readtrack_realtime(uint64_t now);
+    void advance_type1(uint64_t now);
+    void update_force_interrupt(uint64_t now);
+    void complete_command(uint64_t now);
+    void update_head_unload(uint64_t now);
+    void begin_head_idle_unload(uint64_t now);
+    void cancel_head_idle_unload();
+    void offer_read_byte(uint8_t value);
+    bool begin_type23(uint64_t now);
+    bool selected_drive_ready() const;
+    bool active_drive_ready() const;
+    bool head_engaged() const {
+        return head_loaded_ && head_load_timing_;
+    }
+    uint64_t type1_step_cycles(uint8_t command) const {
+        if (step_override_cycles_ != 0) return step_override_cycles_;
+        constexpr uint64_t rates[4] = {
+            6'000ULL * 6, 12'000ULL * 6,
+            20'000ULL * 6, 30'000ULL * 6
+        };
+        return rates[command & 0x03];
+    }
+    uint64_t type23_delay(uint8_t command) const {
+        // Mini-floppy operation uses a 1 MHz controller clock, so the
+        // datasheet's 15 ms E delay at 2 MHz doubles to 30 ms.
+        return (command & 0x04) ? 30'000ULL * 6 : 0;
+    }
+    int id_search_revolutions_for_current_id() const;
+    uint64_t id_search_timeout() const {
+        return static_cast<uint64_t>(record_search_revolutions_) * CYC_PER_REV;
+    }
+    uint64_t next_index_cycle(uint64_t now) const;
     uint64_t byte_cycles() const {
         return command_single_density_ ? CYC_PER_BYTE_FM : CYC_PER_BYTE_MFM;
     }
@@ -132,8 +192,10 @@ private:
     }
     const D88Disk::Sector* active_record() const {
         const D88Disk* d = disks_[read_drive_];
-        return d ? d->sector(read_cyl_, read_side_, read_sector_,
-                             command_single_density_)
+        return d ? d->record_on_track(read_cyl_, read_side_, command_track_,
+                                      static_cast<uint8_t>(read_sector_),
+                                      command_single_density_,
+                                      command_compare_side_, command_side_id_)
                  : nullptr;
     }
     int active_transfer_size() const {
@@ -151,13 +213,13 @@ private:
     // ST_REC_TYPE in the completion status agrees with what READ TRACK
     // renders as F8h vs FBh.
     bool active_sector_deleted() const {
-        const D88Disk* d = disks_[read_drive_];
-        return d && d->deleted_mark_record(read_cyl_, read_side_, read_sector_,
-                                           command_single_density_);
+        const D88Disk::Sector* record = active_record();
+        return record && record->deleted != 0;
     }
     // Last direction a STEP command moved the head, so a bare STEP repeats it.
-    int step_dir_ = 1;
+    int step_dir_ = -1; // Master Reset's implicit RESTORE points outward
     bool disk_write_protected() const {
+        if (!drive_mapped_) return false;
         const D88Disk* d = disks_[drive_];
         return d && d->write_protected();
     }
@@ -169,25 +231,81 @@ private:
     uint8_t sector_reg_ = 0;
     uint8_t data_reg_ = 0;
     uint8_t done_status_ = 0; // error bits latched for when the op completes
-    // Which command family last ran, so an idle status read knows which
-    // meaning bits 1/2/4/5 carry: Type I (seek family) reports INDEX/TRACK00/
-    // SEEK ERROR/HEAD LOADED, Type II/III (read/write/format) reports
-    // DRQ/LOST DATA/RECORD NOT FOUND/RECORD TYPE. Defaults to Type I to match
-    // the chip's power-on/reset status format.
-    bool last_type1_ = true;
+    // The status register reuses its bits by command class. Read and write
+    // commands also differ at bit 6: it is unused after reads, but reports
+    // write protect after writes. Keep that class after BUSY falls so later
+    // status reads cannot reinterpret INDEX as DRQ or expose write protect
+    // on a completed read.
+    StatusClass status_class_ = StatusClass::TypeI;
+    bool head_loaded_ = false;
+    bool head_load_timing_ = true;
+    uint64_t head_load_timing_since_ = 0;
+    bool head_idle_counting_ = false;
+    uint64_t head_idle_sample_cycle_ = 0;
+    uint8_t head_idle_index_count_ = 0;
+    bool type1_verify_ = false;
+    bool type1_verify_started_ = false;
+    uint64_t type1_motion_start_ = 0;
+    uint64_t type1_motion_end_ = 0;
+    uint64_t type1_step_interval_ = 0;
+    int type1_steps_total_ = 0;
+    int type1_steps_applied_ = 0;
+    int type1_drive_ = 0;
+    int type1_motion_direction_ = 0;
+    bool type1_update_track_ = false;
+    bool type1_restore_ = false;
+    uint8_t type1_verify_result_ = 0;
 
     int phys_cyl_[NUM_DRIVES] = {0, 0};
     int side_ = 0;
     int drive_ = 0;
+    int raw_drive_number_ = 0;
+    bool internal_drive_bank_high_ = false;
+    bool drive_mapped_ = true;
     bool motor_ = false;
+    bool drive_select_enabled_ = false;
     uint64_t index_origin_ = 0;
     bool index_origin_valid_ = false;
     bool single_density_ = false;
     // DEh is sampled when a Type II/III command starts. A mid-transfer port
     // write affects the next command, not the record or bit rate in flight.
     bool command_single_density_ = false;
+    bool command_compare_side_ = false;
+    uint8_t command_side_id_ = 0;
+    uint8_t command_track_ = 0;
+    bool require_explicit_head_settle_ = false;
+    bool head_settle_pending_ = false;
+    bool head_settle_violation_ = false;
+    uint64_t head_settle_ready_cycle_ = 0;
+
+    uint64_t read_fault_command_ = 0;
+    bool read_fault_persistent_ = false;
+    bool read_fault_used_ = false;
+    uint64_t read_fault_count_ = 0;
+    bool read_fault_active_ = false;
 
     uint64_t busy_until_ = 0;
+    bool type23_started_ = false;
+    uint64_t type23_ready_cycle_ = 0;
+    // A missing ID is not reported until the controller has exhausted the
+    // command's rotational search interval. Keep that pending condition
+    // separate from status bits that are already observable while BUSY.
+    bool record_search_failed_ = false;
+    uint8_t record_search_revolutions_ = 4;
+    // READ SECTOR learns the deleted-data mark at the start of the data
+    // field and the CRC result at its end, rather than exposing both at
+    // command issue time.
+    uint8_t pending_read_status_ = 0;
+    // The MZ-2500's real MB8876 retains the raw Type-I HLD/TR00 latch bits
+    // through an E=1 READ SECTOR issued immediately after SEEK. They share
+    // bit positions with Type-II Record Type/Lost Data, but are residue, not
+    // transfer results. Keep them separate from done_status_ so real errors
+    // and the observed chip-family quirk remain independently testable.
+    uint8_t read_status_residue_ = 0;
+    bool intrq_ = false;
+    uint8_t force_interrupt_mask_ = 0;
+    bool force_last_ready_ = false;
+    uint64_t force_index_sample_cycle_ = 0;
 
     // active READ SECTOR (position latched at command time, data looked up
     // per byte so a swapped disk cannot dangle)
@@ -199,27 +317,25 @@ private:
     int read_index_ = 0;
     int read_transfer_size_ = 0;
     uint64_t read_start_ = 0; // cycle at which byte 0 becomes available
-    // Cycle of the most recent access to the data register (reg 3) for the
-    // transfer in flight; the real-time fallback in advance_read_realtime()
-    // fires only once a full sector's worth of time has passed since this
-    // without a single access, not simply once total elapsed time exceeds a
-    // sector window -- so a host draining steadily but slowly is never
-    // truncated. Reset to read_start_ when a READ SECTOR command starts, and
-    // again when advance_read_realtime()'s OWN timeout-driven walk moves to
-    // the next sector (so a driver that never touches the register at all
-    // still trips the fallback at exactly the same time on every sector, not
-    // just the first). A CPU-driven multi-sector walk -- the host actually
-    // draining bytes through register 3 -- does NOT get an explicit reset
-    // here at the sector boundary; it does not need one, since every one of
-    // those reg-3 accesses already refreshes this timestamp to `now` on its
-    // own (see the top of the reg==3 case in read()).
-    uint64_t read_last_access_ = 0;
+    bool data_reg_full_ = false;
+    uint64_t read_command_cycle_ = 0;
+    bool read_first_drq_counted_ = false;
+    bool read_completion_counted_ = false;
+    bool previous_read_data_valid_ = false;
+    uint64_t previous_read_data_cycle_ = 0;
+    int previous_read_drive_ = 0;
+    int previous_read_cyl_ = 0;
+    int previous_read_side_ = 0;
+    int previous_read_sector_ = 0;
 
     // active WRITE SECTOR
     uint8_t* write_target() {
         D88Disk* d = disks_[read_drive_];
-        return d ? d->write_record(read_cyl_, read_side_, read_sector_,
-                                   command_single_density_)
+        return d ? d->write_record_on_track(
+                       read_cyl_, read_side_, command_track_,
+                       static_cast<uint8_t>(read_sector_),
+                       command_single_density_, command_compare_side_,
+                       command_side_id_)
                  : nullptr;
     }
     bool write_multiple_ = false;
@@ -227,8 +343,9 @@ private:
     int write_index_ = 0;
     int write_transfer_size_ = 0;
     uint64_t write_start_ = 0;
-    // Same idea as read_last_access_, for the write side (advance_write_realtime()).
-    uint64_t write_last_access_ = 0;
+    bool write_data_full_ = false;
+    bool write_started_ = false;
+    bool write_deleted_ = false;
     uint64_t byte_due(uint64_t start, int index) const {
         return start + (uint64_t)index * byte_cycles();
     }
@@ -236,12 +353,6 @@ private:
     // active READ ADDRESS: the six ID bytes and how many have been taken
     uint8_t id_bytes_[6] = {};
     int id_index_ = 0;
-    // Cycle of the most recent register-3 access during this READ ADDRESS,
-    // seeded to read_start_ at command issue; advance_readaddr_realtime()'s
-    // fallback fires once a whole ID field's worth of time (6 bytes) has
-    // passed since without one, same idea as read_last_access_ above but
-    // scaled to this command's own (much shorter) transfer.
-    uint64_t id_last_access_ = 0;
     int id_next_ = 0; // which record on the track comes round next
     // Which drive/cylinder/side id_next_'s walk position belongs to. A seek,
     // side change, or drive switch moves the head to a different track, so
@@ -259,6 +370,9 @@ private:
     // sectors when the track's worth of bytes has gone by
     std::vector<uint8_t> track_stream_;
     int track_index_ = 0;
+    bool write_track_done_ = false;
+    uint64_t write_track_next_due_ = 0;
+    uint64_t write_track_end_ = 0;
     static constexpr int TRACK_STREAM_BYTES_MFM = 6250;
     static constexpr int TRACK_STREAM_BYTES_FM = 3125;
     int track_stream_bytes() const {
@@ -266,25 +380,16 @@ private:
                                        : TRACK_STREAM_BYTES_MFM;
     }
     void commit_track_stream();
-    // Cycle of the most recent register-3 write during this WRITE TRACK,
-    // seeded to write_start_ at command issue; advance_writetrack_realtime()'s
-    // fallback fires once a whole track stream's worth of time has passed
-    // since without one -- there is no smaller sub-record to walk between
-    // for a format stream, so the "record" this scales to is the whole track.
-    uint64_t track_last_access_ = 0;
 
     // active READ TRACK
     std::vector<uint8_t> read_track_stream_;
     int read_track_index_ = 0;
-    // Same idea as track_last_access_ above, for the read side
-    // (advance_readtrack_realtime()).
-    uint64_t read_track_last_access_ = 0;
 
     // defaults calibrated black-box against EmuZ-2500 (P2/P4): solved from
     // three milestones (audio_boot, title with and without boot preload) so
     // both load-heavy and seek-heavy access patterns land on EmuZ's frames
     uint64_t read_latency_cycles_ = 16'480 * 6;
-    uint64_t step_cycles_ = 27'830 * 6;
+    uint64_t step_override_cycles_ = 0;
 };
 
 } // namespace mz

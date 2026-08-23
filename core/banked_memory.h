@@ -32,6 +32,29 @@ public:
     // control to the boot program. Video RAM and PCG are separate storage
     // and are intentionally not touched by this operation.
     void clear_main_ram();
+    // Test-only equivalent of clear_main_ram(): fill the physical main-RAM
+    // banks, including the optional expansion banks, without touching VRAM,
+    // PCG, ROM, or device state.
+    void fill_main_ram(uint8_t value);
+    // Test-only: fill EVERY writable physical bank - main RAM, GVRAM,
+    // TVRAM and PCG - with seeded pseudo-random bytes. Only the IPL ROM
+    // banks (34h-37h) are spared. Models a machine whose RAM content is
+    // arbitrary at power-on: nothing may rely on any initial value.
+    void fill_all_ram_random(uint32_t seed) {
+        uint32_t x = seed ? seed : 0xA5A5A5A5u;
+        for (int bank = 0; bank < 0x40; bank++) {
+            if (bank >= 0x34 && bank <= 0x37) continue;  // IPL ROM
+            uint8_t* p = phys_.data() + bank * BANK_SIZE;
+            for (int i = 0; i < BANK_SIZE; i++) {
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+                p[i] = static_cast<uint8_t>(x);
+            }
+        }
+    }
+    void set_test_main_ram_fill(uint8_t value) {
+        test_main_ram_fill_enabled_ = true;
+        test_main_ram_fill_value_ = value;
+    }
     void reset_control() {
         selector_ = 0;
         kanji_bank_ = 0;
@@ -86,6 +109,9 @@ public:
     // onto 28h-2Fh, "option". Absent banks read FFh and swallow writes,
     // like empty sockets.
     void set_expansion_ram(bool on) { expansion_ram_ = on; }
+    // Diagnostic-only model for an absent expansion card whose bank selects
+    // mirror the installed 00h-0Fh RAM instead of behaving as open bus.
+    void set_absent_main_ram_alias(bool on) { absent_main_ram_alias_ = on; }
     void set_expansion_gram(bool on) { expansion_gram_ = on; }
     bool bank_present(int bank) const { return !bank_absent(bank & 0x3F); }
 
@@ -98,12 +124,16 @@ private:
     uint8_t kanji_bank_ = 0;
     uint8_t dict_bank_ = 0;
     bool ipl_rom_loaded_ = false;
+    bool test_main_ram_fill_enabled_ = false;
+    uint8_t test_main_ram_fill_value_ = 0;
     bool expansion_ram_ = true;
+    bool absent_main_ram_alias_ = false;
     bool expansion_gram_ = true;
     bool warned_rom_bank_[NUM_BANKS] = {};
 
     bool bank_absent(int bank) const {
-        if (!expansion_ram_ && bank >= 0x10 && bank <= 0x1F) return true;
+        if (!expansion_ram_ && bank >= 0x10 && bank <= 0x1F &&
+            !absent_main_ram_alias_) return true;
         if (!expansion_gram_ && bank >= 0x28 && bank <= 0x2F) return true;
         return false;
     }

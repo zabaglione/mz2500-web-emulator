@@ -11,6 +11,7 @@
 //  - read_decoded(): stored XOR FF (logical). Used by the native dummy IPL.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -23,6 +24,8 @@ public:
     static constexpr int SECTORS_PER_TRACK = 16;
     static constexpr int TRACK_COUNT = 164; // D88 track table entries
     static constexpr int HEADER_SIZE = 0x2B0;
+    static constexpr int LEGACY_TRACK_COUNT = 160;
+    static constexpr int LEGACY_HEADER_SIZE = 0x2A0;
 
     // One sector as the ID field describes it, plus its stored bytes. Data
     // is held exactly as it sits on the image (inverted), so the FDC's read
@@ -32,6 +35,7 @@ public:
         uint8_t density = 0x00; // 00h = double density
         uint8_t deleted = 0x00; // 10h = deleted data mark
         uint8_t status = 0x00;  // FDC status recorded at dump time
+        std::array<uint8_t, 5> reserved = {};
         std::vector<uint8_t> data;
     };
 
@@ -42,12 +46,15 @@ public:
     struct LoadReport {
         bool structural_error = false;
         bool image_size_mismatch = false;
+        size_t trailing_bytes = 0;
         int invalid_track_offsets = 0;
+        int duplicate_track_offsets = 0;
         int track_count_mismatches = 0;
         int records = 0;
         int short_records = 0;
         int truncated_records = 0;
         int unsupported_n_records = 0;
+        int over_capacity_tracks = 0;
     };
     struct Track {
         std::vector<Sector> sectors;
@@ -79,7 +86,8 @@ public:
     }
     bool has_unsupported_records() const {
         return load_report_.unsupported_n_records != 0 ||
-               load_report_.short_records != 0;
+               load_report_.short_records != 0 ||
+               load_report_.over_capacity_tracks != 0;
     }
 
     // Locate the physical record by the ID field, including C/H/R and
@@ -88,6 +96,16 @@ public:
     const Sector* sector(int cylinder, int side, int record) const;
     const Sector* sector(int cylinder, int side, int record,
                          bool single_density) const;
+
+    // Search the records physically present under the selected head. The
+    // ID field's C is compared with the controller Track Register, while H
+    // is compared with the command's S flag only when side comparison is
+    // enabled. This separation is required for deliberately mismatched ID
+    // fields and other non-canonical D88 layouts.
+    const Sector* record_on_track(int physical_cylinder, int physical_side,
+                                  uint8_t id_c, uint8_t id_r,
+                                  bool single_density, bool compare_side,
+                                  uint8_t id_h) const;
 
     // Physical addressing (sector is 1-based as in the ID field). Returns
     // nullptr when the sector does not exist on the mounted image.
@@ -105,9 +123,10 @@ public:
     bool read_decoded(int cylinder, int side, int record, uint8_t* out,
                       size_t capacity) const;
 
-    // IPLPRO is the repository's conventional dummy-IPL layout: the header
-    // is C=0/H=1/R=1 and the two 16-record payload tracks are C=0/H=0 and
-    // C=1/H=0. No LBA arithmetic is used for this check.
+    // IPLPRO header and payload availability check.  Legacy single-bank
+    // images use C=0/H=0 then C=1/H=0.  Multi-bank images use the firmware
+    // source order C=n/H=0 then C=n+1/H=1 for each listed destination bank.
+    // No LBA arithmetic is used for this check.
     bool is_iplpro_compatible() const;
 
     // Writable view of a sector's stored bytes. Returns nullptr when the
@@ -130,6 +149,10 @@ public:
     // contract for existing callers.
     uint8_t* write_record(int cylinder, int side, int sector,
                           bool single_density);
+    uint8_t* write_record_on_track(int physical_cylinder, int physical_side,
+                                   uint8_t id_c, uint8_t id_r,
+                                   bool single_density, bool compare_side,
+                                   uint8_t id_h);
 
     // Set or clear the deleted-data mark the FDC reports on the next read.
     bool set_deleted_mark(int cylinder, int side, int sector, bool deleted);
@@ -137,6 +160,10 @@ public:
                           bool single_density);
     bool set_deleted_mark_record(int cylinder, int side, int sector,
                                  bool deleted, bool single_density);
+    bool set_deleted_mark_on_track(int physical_cylinder, int physical_side,
+                                   uint8_t id_c, uint8_t id_r,
+                                   bool single_density, bool compare_side,
+                                   uint8_t id_h, bool deleted);
 
     // Whether a sector currently carries the deleted-data mark (false when
     // the sector does not exist). READ SECTOR consults this to report
@@ -178,6 +205,7 @@ private:
     Sector* find_sector_mut(int cylinder, int side, int sector);
     Sector* find_sector_mut(int cylinder, int side, int sector,
                             bool single_density);
+    void refresh_record_diagnostics();
 
     Track tracks_[TRACK_COUNT];
     bool loaded_ = false;
@@ -188,7 +216,11 @@ private:
     // Header fields captured verbatim by load() so serialize() can hand
     // them back instead of writing zeroed/hardcoded defaults.
     std::vector<uint8_t> name_ = std::vector<uint8_t>(17, 0); // offset 0x00-0x10
+    std::array<uint8_t, 9> header_reserved_ = {};              // offset 0x11-0x19
     uint8_t media_type_ = 0x10;                               // offset 0x1B, 0x10 = 2DD
+    int header_size_ = HEADER_SIZE;
+    int track_table_entries_ = TRACK_COUNT;
+    std::vector<uint8_t> trailing_data_;
 };
 
 } // namespace mz

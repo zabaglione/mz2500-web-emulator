@@ -6,9 +6,13 @@
 // shared/mz2500/d88.py):
 //
 //   C=0/H=1/R=1: header 01h "IPLPRO", 12-byte title,
-//     [0x18:0x1A] load & entry address, [0x20] physical bank for the payload,
-//     [0x30:0x37] CPU block 0-6 bank assignments
-//   C=0/H=0/R=1..16 and C=1/H=0/R=1..16: the 8KB boot payload
+//     [0x18:0x1A] entry address, [0x20:0x30] physical destination banks
+//     terminated by FFh, [0x30:0x37] CPU block 0-6 bank assignments
+//   source bank n: C=n/H=0/R=1..16 followed by C=n+1/H=1/R=1..16
+//
+// Single-bank images made by this repository before multi-bank support used
+// C=0/H=0 followed by C=1/H=0.  That layout remains supported so existing
+// ROM-free software keeps booting unchanged.
 //
 // It also establishes the initial device state the real IPL leaves behind:
 // CPU block 7 mapped to bank 0Fh, kanji bank register = 0 (bank 39h reads as
@@ -84,6 +88,7 @@ void Mz2500::reset_peripherals_for_boot() {
     cpu_half_cycle_ = 0;
     step_external_wait_ = 0;
     cpu_step_active_ = false;
+    cpu_reset_pending_ = false;
 }
 
 bool Mz2500::boot_from_disk() {
@@ -138,19 +143,46 @@ bool Mz2500::boot_from_disk() {
     opn_.set_ssg_io_handoff(0x7F, 0x04);
     opn_regs_[0x07] = 0x7F;
     opn_regs_[0x0E] = 0x04;
+    fdc_.set_internal_drive_bank(false, cpu_.cyc);
 
-    const uint8_t payload_bank = header[0x20] & 0x3F;
-    uint8_t* dest = mem_.bank_ptr(payload_bank);
-    for (int r = 1; r <= D88Disk::SECTORS_PER_TRACK; r++) {
-        if (!boot_disk.read_decoded(0, 0, r,
-                                    dest + (r - 1) * D88Disk::SECTOR_SIZE,
-                                    D88Disk::SECTOR_SIZE))
+    uint8_t payload_banks[16] = {};
+    int payload_count = 0;
+    bool bank_list_terminated = false;
+    for (int index = 0; index < 16; index++) {
+        const uint8_t value = header[0x20 + index];
+        if (value == 0xFF) {
+            bank_list_terminated = true;
+            break;
+        }
+        if (value >= BankedMemory::NUM_BANKS) {
+            std::fprintf(stderr, "[ipl] unsupported destination bank %02Xh\n", value);
             return false;
-        if (!boot_disk.read_decoded(1, 0, r,
-                                    dest + (D88Disk::SECTORS_PER_TRACK + r - 1) *
-                                        D88Disk::SECTOR_SIZE,
-                                    D88Disk::SECTOR_SIZE))
-            return false;
+        }
+        payload_banks[payload_count++] = value;
+    }
+    if (!bank_list_terminated || payload_count == 0) {
+        std::fprintf(stderr, "[ipl] invalid or unterminated payload bank list\n");
+        return false;
+    }
+
+    for (int index = 0; index < payload_count; index++) {
+        uint8_t* dest = mem_.bank_ptr(payload_banks[index]);
+        const bool legacy_single_bank = payload_count == 1;
+        const int first_cylinder = legacy_single_bank ? 0 : index;
+        const int second_cylinder = legacy_single_bank ? 1 : index + 1;
+        const int second_side = legacy_single_bank ? 0 : 1;
+        for (int r = 1; r <= D88Disk::SECTORS_PER_TRACK; r++) {
+            if (!boot_disk.read_decoded(first_cylinder, 0, r,
+                                        dest + (r - 1) * D88Disk::SECTOR_SIZE,
+                                        D88Disk::SECTOR_SIZE))
+                return false;
+            if (!boot_disk.read_decoded(
+                    second_cylinder, second_side, r,
+                    dest + (D88Disk::SECTORS_PER_TRACK + r - 1) *
+                        D88Disk::SECTOR_SIZE,
+                    D88Disk::SECTOR_SIZE))
+                return false;
+        }
     }
 
     for (int block = 0; block < 7; block++) mem_.set_map(block, header[0x30 + block]);
@@ -179,9 +211,10 @@ bool Mz2500::boot_from_disk() {
         char title[13] = {};
         std::memcpy(title, header + 7, 12);
         std::fprintf(stderr,
-                     "[ipl] IPLPRO \"%s\" -> 8KB into bank %02Xh, blocks "
+                     "[ipl] IPLPRO \"%s\" -> %d x 8KB, entry bank %02Xh, blocks "
                      "0-6 = %02X %02X %02X %02X %02X %02X %02X, PC=%04Xh\n",
-                     title, payload_bank, header[0x30], header[0x31], header[0x32],
+                     title, payload_count, payload_banks[payload_count - 1],
+                     header[0x30], header[0x31], header[0x32],
                      header[0x33], header[0x34], header[0x35], header[0x36], cpu_.pc);
     }
     return true;

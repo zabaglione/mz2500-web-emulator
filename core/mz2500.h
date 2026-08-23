@@ -41,6 +41,13 @@ public:
         RealIplRequired = 2,
         Invalid = 3,
     };
+    enum class DiskBootIssue : uint8_t {
+        None = 0,
+        StructuralError = 1,
+        ShortRecord = 2,
+        UnsupportedN = 3,
+        OverCapacityTrack = 4,
+    };
 
     Mz2500();
 
@@ -56,11 +63,22 @@ public:
     DiskBootProfile disk_boot_profile(int drive) const {
         const D88Disk& disk = disks_[drive & 1];
         if (!disk.loaded()) return DiskBootProfile::NoDisk;
-        if (disk.has_structural_error() || disk.has_unsupported_records())
+        if (disk_boot_issue(drive) != DiskBootIssue::None)
             return DiskBootProfile::Invalid;
         return disk.is_iplpro_compatible()
             ? DiskBootProfile::IplProCompatible
             : DiskBootProfile::RealIplRequired;
+    }
+    DiskBootIssue disk_boot_issue(int drive) const {
+        const D88Disk& disk = disks_[drive & 1];
+        if (!disk.loaded()) return DiskBootIssue::None;
+        const D88Disk::LoadReport& report = disk.load_report();
+        if (disk.has_structural_error()) return DiskBootIssue::StructuralError;
+        if (report.short_records != 0) return DiskBootIssue::ShortRecord;
+        if (report.unsupported_n_records != 0) return DiskBootIssue::UnsupportedN;
+        if (report.over_capacity_tracks != 0)
+            return DiskBootIssue::OverCapacityTrack;
+        return DiskBootIssue::None;
     }
 
     // Put an unformatted floppy in a drive. Every read reports record-not-
@@ -94,6 +112,24 @@ public:
     // deliberately preserves RAM, bank mapping, video state, and peripheral
     // latches so resident system software can handle its reset vector.
     void system_reset();
+
+    // Test-only initial-RAM condition. The value is applied at the disk-boot
+    // boundary, after the boot baseline and before the disk payload transfer.
+    // For a real IPL it replaces the model's synthetic RAM clear so the ROM
+    // itself observes the requested initial condition. It is deliberately
+    // opt-in so ordinary boot and RESET behavior is unchanged.
+    void set_test_pit_mute() { test_pit_mute_ = true; }
+    void set_test_ram_random(uint32_t seed) {
+        test_ram_random_enabled_ = true;
+        test_ram_random_seed_ = seed;
+    }
+    void set_test_ram_fill(uint8_t value) {
+        test_ram_fill_enabled_ = true;
+        test_ram_fill_value_ = value;
+        mem_.set_test_main_ram_fill(value);
+    }
+    bool test_ram_fill_enabled() const { return test_ram_fill_enabled_; }
+    uint8_t test_ram_fill_value() const { return test_ram_fill_value_; }
 
     // User-provided ROM images (kind: 0=ipl, 1=retired/reserved, 2=kanji, 3=dict,
     // 4=MZ-1E30 SASI BIOS). Never
@@ -147,8 +183,60 @@ public:
     BankedMemory& memory() { return mem_; }
     uint8_t read_memory(uint16_t addr) { return mem_.read(addr); }
 
+    // Opt-in stack-boundary probe for real-hardware investigations. It is
+    // deliberately disabled for ordinary runs and starts collecting only
+    // when the selected entry PC is executed, so IPL startup frames do not
+    // get mixed with the game runtime measurement.
+    struct StackDiagnostics {
+        bool enabled = false;
+        bool entry_seen = false;
+        bool isr_active = false;
+        uint16_t guard = 0xCFB0;
+        uint16_t adjacent_code_floor = 0xCD10;
+        uint16_t adjacent_data_floor = 0xCF9E;
+        uint16_t entry_pc = 0xD000;
+        uint16_t isr_entry = 0xECDD;
+        uint64_t instructions = 0;
+        uint64_t sp_samples = 0;
+        uint16_t min_sp = 0xFFFF;
+        uint16_t min_sp_pc = 0;
+        uint16_t min_sp_before = 0xFFFF;
+        uint16_t min_sp_before_pc = 0;
+        uint16_t min_sp_after = 0xFFFF;
+        uint16_t min_sp_after_pc = 0;
+        uint64_t isr_samples = 0;
+        uint16_t isr_min_sp = 0xFFFF;
+        uint16_t isr_min_sp_pc = 0;
+        uint64_t writes_below_guard = 0;
+        uint64_t writes_into_adjacent_blob = 0;
+        uint64_t writes_into_adjacent_code = 0;
+        uint64_t writes_while_sp_below_guard = 0;
+        uint64_t stack_pointer_writes_below_guard = 0;
+        uint16_t first_write_addr = 0;
+        uint16_t first_write_pc = 0;
+        uint16_t first_write_sp = 0;
+        uint16_t first_adjacent_code_write_addr = 0;
+        uint16_t first_adjacent_code_write_pc = 0;
+        uint16_t first_adjacent_code_write_sp = 0;
+        uint16_t first_pointer_write_addr = 0;
+        uint16_t first_pointer_write_pc = 0;
+        uint16_t first_pointer_write_sp = 0;
+    };
+    void set_stack_diagnostics(bool on, uint16_t guard = 0xCFB0,
+                               uint16_t entry_pc = 0xD000,
+                               uint16_t isr_entry = 0xECDD,
+                               uint16_t adjacent_code_floor = 0xCD10,
+                               uint16_t adjacent_data_floor = 0xCF9E);
+    const StackDiagnostics& stack_diagnostics() const { return stack_diag_; }
+
     void set_trace_boot(bool v) { trace_boot_ = v; }
     void set_trace_io(bool v) { trace_io_ = v; }
+
+    // Opt-in hardware timing check for the G-CRTC register table. The web
+    // compatibility path remains unchanged unless this is enabled.
+    void set_strict_gcrtc(bool on) { strict_gcrtc_ = on; }
+    bool strict_gcrtc() const { return strict_gcrtc_; }
+    uint64_t gde_vblank_violations() const { return gde_vblank_violations_; }
 
     // VRAM wait profiler. A development aid for fitting game code to the
     // wait model in core/vram_wait.h: every charged video access is
@@ -377,6 +465,9 @@ public:
         opn_regs_[0x0E] = value;
         opn_.write_address(0x0E, cpu_.cyc);
         opn_.write_data(value, cpu_.cyc);
+        fdc_.set_internal_drive_bank(
+            opn_.port_a_is_output() && (opn_.port_a_pins() & 0x02) != 0,
+            cpu_.cyc);
     }
     bool test_sio_channel_b_has_data() const { return sio_.rx_available(1); }
     uint8_t test_sio_channel_b_read_byte() { return sio_.read_data(1, cpu_.cyc); }
@@ -393,6 +484,22 @@ public:
         const uint8_t low = port & 0xFF;
         if (low == 0xAC || low == 0xAD || low == 0x98 || low == 0x99)
             io_out(port, value);
+    }
+    uint8_t test_fdd_port_in(uint16_t port) {
+        const uint8_t low = port & 0xFF;
+        return low >= 0xD8 && low <= 0xDE ? io_in_raw(port) : 0xFF;
+    }
+    void test_fdd_port_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if (low >= 0xD8 && low <= 0xDE) io_out(port, value);
+    }
+    void test_set_cycles(uint64_t value) { cpu_.cyc = value; }
+    void test_gde_port_out(uint16_t port, uint8_t value) {
+        const uint8_t low = port & 0xFF;
+        if (low == 0xBC || low == 0xBD) io_out(port, value);
+    }
+    uint8_t test_gde_reg(uint8_t reg) const {
+        return reg < sizeof(gde_regs_) ? gde_regs_[reg] : 0xFF;
     }
     uint8_t test_cmt_port_in(uint16_t port) {
         return (port & 0xFF) >= 0xE0 && (port & 0xFF) <= 0xE3
@@ -437,6 +544,16 @@ public:
     // Machine state snapshot as JSON (debug panel / future tooling).
     // Returns the number of bytes written (excluding the terminator).
     size_t debug_json(char* buf, size_t cap);
+
+    // The TEXT CRTC's own register file (port F4h index / F5h data,
+    // registers $00-$1F plus the palette at $80-$8F) - distinct from the
+    // GDE ("G-CRTC")'s identically-numbered registers reachable through
+    // BCh/BDh. debug_json's "hdsc"/"crtc0" fields cover the GDE side and
+    // text register $00 only; this exposes the rest for the display
+    // register survey (raster-count bit3 of $0F, timing $03/$05/$07/$08).
+    uint8_t text_crtc_reg(int index) const { return crtc_regs_[index & 0xFF]; }
+    uint8_t text_font_size() const { return font_size_; } // port F7h
+    uint8_t text_cg_mask() const { return cg_mask_; }     // port F6h
 
     // Decode the text layer to UTF-8, one line per displayed row, following
     // the same CRTC roll/page state as the renderer (renderer.cpp). Kanji-ROM
@@ -490,11 +607,16 @@ private:
     void render_compat_line(uint8_t* row, int y, int mode) const;
     bool compat_window(uint16_t addr, int& bank, uint16_t& offset) const;
     void charge_compat_vram_wait();
+    void charge_fdd_io_wait();
     void update_boot_sense_inputs();
     void io_out(uint16_t port, uint8_t value);
-    uint8_t blank_flags() const; // port F4h read: bit0 VBLANK, bit1 HBLANK
+    uint8_t blank_flags() const; // raw raster state: bit0 VBLANK, bit1 HBLANK
     void log_port_once(uint16_t port, const char* dir);
     void service_interrupts();
+    void reset_stack_diagnostics_counters();
+    void observe_stack_instruction(uint16_t pc, uint16_t sp, bool before);
+    void observe_stack_write(uint16_t addr);
+    void observe_stack_interrupt_entry();
 
     z80 cpu_{};
     BankedMemory mem_;
@@ -537,6 +659,8 @@ private:
     uint8_t gde_index_ = 0;       // port BCh register number (7 bits)
     bool gde_autoinc_ = false;    // BCh bit7: bump reg number after each write
     uint8_t gde_regs_[32] = {};   // port BDh, internal registers 00-1Fh
+    bool strict_gcrtc_ = false;
+    uint64_t gde_vblank_violations_ = 0;
     uint64_t gde_busy_until_ = 0; // hardware GRAM clear in progress
     uint8_t gvram_latch_[4] = {}; // ports BCh-BFh: last plane bytes read
     int current_line() const;
@@ -615,7 +739,6 @@ private:
         bool latched = false;
         bool loaded = false;
         bool counting = false;
-        bool terminal = false;
         uint64_t start_cyc = 0;
         uint32_t count() const { return reload ? reload : 0x10000; }
     };
@@ -643,6 +766,18 @@ private:
     }
     void ppi_write_control(uint8_t value);
     void update_ppi_outputs();
+    // 8255 port C bit1 is NST ("start normal state"): a rising edge restarts
+    // the Z80 at the currently mapped 0000h, RAM and every latch intact -
+    // the MZ-2000/80B way for a loader to hand control to a program it
+    // placed at 0000h.
+    // Bit3 (BST, "start boot state") is deliberately not modelled:
+    // real-hardware software writes port C = 58h (BST high) at start-up
+    // without rebooting, so a high BST is an idle level, and no primary
+    // source or probe has fixed which transition (if any) re-enters the IPL.
+    static constexpr uint8_t PPI_C_NST = 0x02;
+    void note_ppi_port_c_change(uint8_t previous);
+    void reset_cpu_state();
+    bool cpu_reset_pending_ = false;
     uint8_t pio_ctrl_[2] = {};    // Z80 PIO control words (E9h/EBh)
     bool mz1m10_present_ = true;  // 4096-colour palette board option
     bool adpcm_present_ = true;   // MZ-1E35 ADPCM board option
@@ -683,6 +818,8 @@ private:
     int trap_watch_ = -1;
     bool trap_hit_ = false;
 
+    StackDiagnostics stack_diag_{};
+
     uint64_t frame_origin_ = 0;
     uint64_t frames_ = 0;
     // cpu_.cyc is the 6 MHz machine-time axis shared by video, sound and
@@ -697,6 +834,11 @@ private:
     // the immediate post-reset state observable, then apply that check just
     // before the first emulated IPL frame executes.
     bool real_ipl_ram_init_pending_ = false;
+    bool test_pit_mute_ = false;
+    bool test_ram_random_enabled_ = false;
+    uint32_t test_ram_random_seed_ = 1;
+    bool test_ram_fill_enabled_ = false;
+    uint8_t test_ram_fill_value_ = 0;
     int boot_delay_frames_ = DEFAULT_BOOT_DELAY_FRAMES;
     int idle_frames_remaining_ = 0;
     bool trace_boot_ = false;

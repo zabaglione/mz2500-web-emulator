@@ -47,6 +47,13 @@ EMSCRIPTEN_KEEPALIVE int emu_disk_boot_profile(int drive) {
     return static_cast<int>(g_machine->disk_boot_profile(drive));
 }
 
+// Detailed reason for profile 3: 0=none, 1=structure, 2=short record,
+// 3=unsupported N, 4=track exceeds the supported physical capacity.
+EMSCRIPTEN_KEEPALIVE int emu_disk_boot_issue(int drive) {
+    if (!g_machine) return static_cast<int>(mz::Mz2500::DiskBootIssue::None);
+    return static_cast<int>(g_machine->disk_boot_issue(drive));
+}
+
 // ---- written disks: hand the image back for the browser to keep ---------
 namespace {
 std::vector<uint8_t> g_disk_out;

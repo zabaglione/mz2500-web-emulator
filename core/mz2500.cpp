@@ -8,6 +8,15 @@
 
 namespace mz {
 
+namespace {
+
+bool is_vblank_timed_gde_register(uint8_t reg) {
+    return (reg >= 0x08 && reg <= 0x0D) ||
+           (reg >= 0x0F && reg <= 0x18);
+}
+
+} // namespace
+
 Mz2500::Mz2500() {
     z80_init(&cpu_);
     cpu_.read_byte = cb_read;
@@ -20,10 +29,10 @@ Mz2500::Mz2500() {
     update_boot_sense_inputs();
 }
 
-void Mz2500::system_reset() {
-    // RESET is not the front-panel IPL button. The CPU clock keeps running
-    // and every external latch remains untouched; only the Z80 reset state
-    // is established before execution resumes at the currently mapped 0000h.
+void Mz2500::reset_cpu_state() {
+    // The CPU clock keeps running and every external latch remains
+    // untouched; only the Z80 reset state is established before execution
+    // resumes at the currently mapped 0000h.
     const unsigned long machine_cycles = cpu_.cyc;
     z80_init(&cpu_);
     cpu_.read_byte = cb_read;
@@ -36,8 +45,25 @@ void Mz2500::system_reset() {
     cpu_half_cycle_ = 0;
     step_external_wait_ = 0;
     cpu_step_active_ = false;
+    cpu_reset_pending_ = false;
     real_ipl_ram_init_pending_ = false;
     idle_frames_remaining_ = 0;
+}
+
+void Mz2500::system_reset() {
+    // RESET is not the front-panel IPL button: a Z80-only restart.
+    reset_cpu_state();
+    if (test_ram_random_enabled_) mem_.fill_all_ram_random(test_ram_random_seed_);
+    if (test_ram_fill_enabled_) mem_.fill_main_ram(test_ram_fill_value_);
+}
+
+void Mz2500::note_ppi_port_c_change(uint8_t previous) {
+    // NST is the software form of that RESET. It only counts as an output
+    // while the lower half of port C is programmed as one, and only its
+    // rising edge starts anything; the latch itself stays set afterwards.
+    if (!ppi_port_c_output(1)) return;
+    if ((previous & PPI_C_NST) == 0 && (ppi_[2] & PPI_C_NST) != 0)
+        cpu_reset_pending_ = true;
 }
 
 bool Mz2500::insert_disk(int drive, const std::string& path) {
@@ -153,6 +179,13 @@ void Mz2500::charge_compat_vram_wait() {
     // The 4 MHz column in the official wait table assigns one wait to the
     // legacy VRAM windows. It is already expressed on the common 6 MHz
     // machine-time axis used by the rest of this core.
+    cpu_.cyc++;
+    if (cpu_step_active_) step_external_wait_++;
+}
+
+void Mz2500::charge_fdd_io_wait() {
+    // The MZ-2500 I/O map assigns one additional wait to every access in
+    // the MB8876 interface block (D8h-DEh).
     cpu_.cyc++;
     if (cpu_step_active_) step_external_wait_++;
 }
@@ -302,6 +335,7 @@ uint8_t Mz2500::cb_read(void* ud, uint16_t addr) {
 }
 void Mz2500::cb_write(void* ud, uint16_t addr, uint8_t value) {
     auto* m = static_cast<Mz2500*>(ud);
+    m->observe_stack_write(addr);
     int compat_bank = 0;
     uint16_t compat_offset = 0;
     if (m->compat_window(addr, compat_bank, compat_offset)) {
@@ -646,6 +680,7 @@ uint8_t Mz2500::io_in_raw(uint16_t port) {
         return v;
     }
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+        charge_fdd_io_wait();
         return static_cast<uint8_t>(~fdc_.read((port & 0xFF) - 0xD8, cpu_.cyc));
     case 0xCA:
         // telephone unit status (MZ-1X09 class option, not installed):
@@ -692,7 +727,14 @@ uint8_t Mz2500::io_in_raw(uint16_t port) {
         if (!cmt_.tape_loaded() || cmt_.write_protected()) v |= 0x10;
         if (!cmt_.running(cpu_.cyc)) v |= 0x08;
         if (key_rows_[3] & 0x80) v &= (uint8_t)~0x80;
-        if (!(blank_flags() & 0x01)) v |= 0x01;
+        // Bit0 is the documented V-BLANKING flag (0 = inside vertical
+        // blanking), but the pin is not the raw raster: on hardware it was
+        // alive right after BASIC, whose console keeps the C6h VBLANK
+        // source enabled, and frozen at 1 the moment MZSD's install left
+        // only the 8253 bit set (NEKO, 2026-08-15). It follows the
+        // interrupt controller's gated VBLANK line, so a masked source
+        // idles the flag high.
+        if (!(int_select_ & 0x08) || !(blank_flags() & 0x01)) v |= 0x01;
         return v;
     }
     case 0xE2: {
@@ -721,9 +763,17 @@ uint8_t Mz2500::io_in_raw(uint16_t port) {
     case 0xEF: return static_cast<uint8_t>(~joy_mask_);
     case 0xFE: return printer_.read_control(cpu_.cyc);
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:
-        // All four ports return the same H/V display-period pins in native
-        // mode. Their read value is explicitly undefined after the
-        // character controller enters either compatibility mode.
+        // PROVISIONAL. No source documents a read value here, and NEKO's
+        // hardware runs (2026-08-15) showed bit0 is not the V-BLANK flag
+        // this H/V display-period model invented: level, polarity and
+        // duty-cycle detection all misfired on the machine (the one
+        // documented flag is E1h bit0, itself gated by C6h). The model
+        // survives only because pre-migration titles (graze_storm,
+        // vector_raid, doom_demake, top_view_action) still spin on it in
+        // wait_vblank; hwdiag's F4h toggle-meter cases measure the real
+        // read so this can become that value once the titles move to the
+        // C6h VBLANK interrupt (NEKO's pf_vb_install). Reads stay
+        // undefined in either compatibility mode.
         if (display_compat_mode() != 0) return 0xFF;
         return static_cast<uint8_t>(~blank_flags() & 0x03);
     default:
@@ -828,6 +878,17 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         if (gde_autoinc_)
             gde_index_ = (uint8_t)((gde_index_ & ~3) | ((gde_index_ + 1) & 3));
         if (reg > 0x1F) return;
+        if (strict_gcrtc_ && is_vblank_timed_gde_register(reg) &&
+            !(blank_flags() & 0x01)) {
+            ++gde_vblank_violations_;
+            std::fprintf(stderr,
+                         "[gcrtc] vblank violation=%llu frame=%llu cycle=%llu "
+                         "pc=%04X reg=%02X value=%02X line=%d\n",
+                         (unsigned long long)gde_vblank_violations_,
+                         (unsigned long long)frames_,
+                         (unsigned long long)cpu_.cyc, cpu_.pc, reg, value,
+                         current_line());
+        }
         gde_regs_[reg] = value;
         for (int line = raster_write_start_line();
              line < VBLANK_START_LINE; line++)
@@ -863,6 +924,10 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         if (opn_addr_ == 0x28 && (value & 3) != 3) fm_keyon_[value & 3] = value >> 4;
         opn_.write_data(value, cpu_.cyc);
         if (opn_addr_ == 0x07 || opn_addr_ == 0x0E) {
+            fdc_.set_internal_drive_bank(
+                opn_.port_a_is_output() &&
+                    (opn_.port_a_pins() & 0x02) != 0,
+                cpu_.cyc);
             for (int line = raster_write_start_line();
                  line < VBLANK_START_LINE; line++) {
                 raster_line_[line].opn_port_a = opn_.port_a_pins();
@@ -879,11 +944,19 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
     case 0xCE: mem_.set_dict_bank(value); return;
     case 0xCF: mem_.set_kanji_bank(value); return;
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
+        charge_fdd_io_wait();
         fdc_.write((port & 0xFF) - 0xD8, static_cast<uint8_t>(~value), cpu_.cyc);
         return;
-    case 0xDC: fdc_.write_drive(value, cpu_.cyc); return;
-    case 0xDD: fdc_.write_side(value); return;
+    case 0xDC:
+        charge_fdd_io_wait();
+        fdc_.write_drive(value, cpu_.cyc);
+        return;
+    case 0xDD:
+        charge_fdd_io_wait();
+        fdc_.write_side(value, cpu_.cyc);
+        return;
     case 0xDE:
+        charge_fdd_io_wait();
         fdc_.set_single_density((value & 0x01) != 0);
         return;
     case 0xE0:
@@ -898,15 +971,18 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
         // readback; the browser CMT device currently exposes the data track.
         ppi_[1] = value;
         return;
-    case 0xE2:
+    case 0xE2: {
         // 8255 port C: bit2 = SOUND drives the BEEP speaker (BASIC's startup
-        // pip toggles it at audio rate)
+        // pip toggles it at audio rate), bit1 = NST restarts the CPU
+        const uint8_t previous = ppi_[2];
         ppi_[2] = value;
         update_ppi_outputs();
+        note_ppi_port_c_change(previous);
         for (int line = raster_write_start_line();
              line < VBLANK_START_LINE; line++)
             raster_line_[line].ppi_c = ppi_[2];
         return;
+    }
     case 0xE3:
         ppi_write_control(value);
         for (int line = raster_write_start_line();
@@ -1035,7 +1111,7 @@ void Mz2500::io_out(uint16_t port, uint8_t value) {
 
 uint16_t Mz2500::pit_current(int ch) const {
     const PitChannel& c = pit_[ch];
-    if (!c.counting) return c.terminal ? 0 : (uint16_t)c.reload;
+    if (!c.counting) return (uint16_t)c.reload;
     // The three channels are chained (I/O map): CLK0 = 31.25kHz, CLK1 = OUT0,
     // CLK2 = OUT1. So each channel counts at the rate its predecessor
     // overflows - BASIC-M25 reads ch2 as its wall clock and only does timer
@@ -1050,7 +1126,12 @@ uint16_t Mz2500::pit_current(int ch) const {
     if (ticks == 0) return (uint16_t)c.reload;
     int mode = (c.control >> 1) & 7;
     if (mode >= 6) mode -= 4;
-    if (mode != 2 && mode != 3 && ticks >= c.count()) return 0;
+    // Modes 2 and 3 are periodic: the counter reloads itself. In modes 0,
+    // 1, 4 and 5 the counting element does not stop at the terminal count;
+    // it wraps to FFFFh and keeps decrementing (Intel 8253/8254 counter
+    // description). MZ-2000 software polls ch1 in mode 0 waiting for the
+    // reading to CHANGE, which only ever happens again because of that wrap.
+    if (mode != 2 && mode != 3) return (uint16_t)(c.count() - ticks);
     return (uint16_t)(c.count() - 1 - ((ticks - 1) % c.count()));
 }
 
@@ -1058,7 +1139,6 @@ void Mz2500::pit_start_counter(int ch) {
     PitChannel& c = pit_[ch];
     if (!c.loaded) return;
     c.counting = true;
-    c.terminal = false;
     c.start_cyc = cpu_.cyc;
     if (ch == 0) {
         pit_counting_ = true;
@@ -1094,7 +1174,6 @@ void Mz2500::pit_write_control(uint8_t value) {
     c.rd_phase = 0;
     c.loaded = false;
     c.counting = false;
-    c.terminal = false;
     if (ch == 0) pit_counting_ = false;
 }
 
@@ -1120,7 +1199,6 @@ void Mz2500::pit_write_counter(int ch, uint8_t value) {
     }
     if (complete) {
         c.loaded = true;
-        c.terminal = false;
         int mode = (c.control >> 1) & 7;
         if (mode >= 6) mode -= 4;
         // Hardware-triggered one-shot/strobe modes wait for GATE. The other
@@ -1152,8 +1230,10 @@ void Mz2500::ppi_write_control(uint8_t value) {
     }
 
     const int bit = (value >> 1) & 7;
+    const uint8_t previous = ppi_[2];
     ppi_[2] = (uint8_t)((ppi_[2] & ~(1 << bit)) | ((value & 1) << bit));
     update_ppi_outputs();
+    note_ppi_port_c_change(previous);
 }
 
 uint8_t Mz2500::pit_read_counter(int ch) {
@@ -1227,11 +1307,15 @@ void Mz2500::service_interrupts() {
             while (cpu_.cyc >= pit_next_fire_)
                 pit_next_fire_ += period; // merge missed ticks
         } else {
+            // One-shot interrupt: only the scheduling stops. The counting
+            // element itself runs on past the terminal count (see
+            // pit_current), so ch0 keeps reading a moving value.
             pit_counting_ = false;
-            pit_[0].counting = false;
-            pit_[0].terminal = true;
         }
-        if (int_select_ & 0x04) int_pending_[2] = true;
+        // --no-pit: the real-hardware NEKO probes show the 8253 tick
+        // never reaching the CPU; this test switch mimics that symptom
+        // (counter behavior stays intact, only the interrupt is muted).
+        if ((int_select_ & 0x04) && !test_pit_mute_) int_pending_[2] = true;
     }
     // VBLANK: one interrupt per frame at the start of vertical blanking.
     // BASIC-M25's console scroll parks on a flag its VBLANK handler clears.
@@ -1275,10 +1359,12 @@ void Mz2500::service_interrupts() {
         for (int src = 3; src >= 0; src--) {
             if (int_pending_[src] && (int_select_ & (1 << src))) {
                 int_pending_[src] = false;
-                if (trace_io_)
-                    std::fprintf(stderr, "[int] f%llu src%d vec=%02X\n",
-                                 (unsigned long long)frames_, src, int_vectors_[src]);
+            if (trace_io_)
+                std::fprintf(stderr, "[int] f%llu src%d vec=%02X\n",
+                             (unsigned long long)frames_, src, int_vectors_[src]);
                 z80_gen_int(&cpu_, int_vectors_[src]);
+                if (cpu_.pc == stack_diag_.isr_entry)
+                    observe_stack_interrupt_entry();
                 break;
             }
         }
@@ -1286,7 +1372,109 @@ void Mz2500::service_interrupts() {
 }
 
 void Mz2500::cb_reti(z80* z) {
-    static_cast<Mz2500*>(z->userdata)->sio_.reti();
+    auto* m = static_cast<Mz2500*>(z->userdata);
+    m->sio_.reti();
+    if (m->stack_diag_.isr_active) m->stack_diag_.isr_active = false;
+}
+
+void Mz2500::reset_stack_diagnostics_counters() {
+    const bool enabled = stack_diag_.enabled;
+    const uint16_t guard = stack_diag_.guard;
+    const uint16_t adjacent_code_floor = stack_diag_.adjacent_code_floor;
+    const uint16_t adjacent_data_floor = stack_diag_.adjacent_data_floor;
+    const uint16_t entry_pc = stack_diag_.entry_pc;
+    const uint16_t isr_entry = stack_diag_.isr_entry;
+    stack_diag_ = StackDiagnostics{};
+    stack_diag_.enabled = enabled;
+    stack_diag_.guard = guard;
+    stack_diag_.adjacent_code_floor = adjacent_code_floor;
+    stack_diag_.adjacent_data_floor = adjacent_data_floor;
+    stack_diag_.entry_pc = entry_pc;
+    stack_diag_.isr_entry = isr_entry;
+    stack_diag_.entry_seen = true;
+}
+
+void Mz2500::set_stack_diagnostics(bool on, uint16_t guard, uint16_t entry_pc,
+                                   uint16_t isr_entry, uint16_t adjacent_code_floor,
+                                   uint16_t adjacent_data_floor) {
+    stack_diag_ = StackDiagnostics{};
+    stack_diag_.enabled = on;
+    stack_diag_.guard = guard;
+    stack_diag_.adjacent_code_floor = adjacent_code_floor;
+    stack_diag_.adjacent_data_floor = adjacent_data_floor;
+    stack_diag_.entry_pc = entry_pc;
+    stack_diag_.isr_entry = isr_entry;
+}
+
+void Mz2500::observe_stack_instruction(uint16_t pc, uint16_t sp, bool before) {
+    if (!stack_diag_.enabled) return;
+    if (!stack_diag_.entry_seen) {
+        if (pc != stack_diag_.entry_pc) return;
+        reset_stack_diagnostics_counters();
+    }
+    if (pc == stack_diag_.isr_entry) stack_diag_.isr_active = true;
+    stack_diag_.sp_samples++;
+    if (sp < stack_diag_.min_sp) {
+        stack_diag_.min_sp = sp;
+        stack_diag_.min_sp_pc = pc;
+    }
+    if (before) {
+        if (sp < stack_diag_.min_sp_before) {
+            stack_diag_.min_sp_before = sp;
+            stack_diag_.min_sp_before_pc = pc;
+        }
+        stack_diag_.instructions++;
+    } else if (sp < stack_diag_.min_sp_after) {
+        stack_diag_.min_sp_after = sp;
+        stack_diag_.min_sp_after_pc = pc;
+    }
+    if (stack_diag_.isr_active && sp < stack_diag_.isr_min_sp) {
+        stack_diag_.isr_min_sp = sp;
+        stack_diag_.isr_min_sp_pc = pc;
+    }
+    if (stack_diag_.isr_active) stack_diag_.isr_samples++;
+}
+
+void Mz2500::observe_stack_write(uint16_t addr) {
+    if (!stack_diag_.enabled || !stack_diag_.entry_seen) return;
+    if (addr >= stack_diag_.guard) return;
+    stack_diag_.writes_below_guard++;
+    const uint16_t sp = cpu_.sp;
+    const uint16_t pc = cpu_step_active_ ? insn_pc_ : cpu_.pc;
+    if (stack_diag_.writes_below_guard == 1) {
+        stack_diag_.first_write_addr = addr;
+        stack_diag_.first_write_pc = pc;
+        stack_diag_.first_write_sp = sp;
+    }
+    if (sp < stack_diag_.guard) stack_diag_.writes_while_sp_below_guard++;
+    if (addr >= stack_diag_.adjacent_code_floor && addr < stack_diag_.guard)
+        stack_diag_.writes_into_adjacent_blob++;
+    if (addr >= stack_diag_.adjacent_code_floor &&
+        addr < stack_diag_.adjacent_data_floor) {
+        stack_diag_.writes_into_adjacent_code++;
+        if (stack_diag_.writes_into_adjacent_code == 1) {
+            stack_diag_.first_adjacent_code_write_addr = addr;
+            stack_diag_.first_adjacent_code_write_pc = pc;
+            stack_diag_.first_adjacent_code_write_sp = sp;
+        }
+    }
+    // Z80 PUSH/CALL/interrupt entry writes the two bytes at SP and SP+1
+    // after SP has moved. This shape separates a stack frame from an
+    // unrelated program store in the same C000h page.
+    if (addr == sp || addr == static_cast<uint16_t>(sp + 1)) {
+        stack_diag_.stack_pointer_writes_below_guard++;
+        if (stack_diag_.stack_pointer_writes_below_guard == 1) {
+            stack_diag_.first_pointer_write_addr = addr;
+            stack_diag_.first_pointer_write_pc = pc;
+            stack_diag_.first_pointer_write_sp = sp;
+        }
+    }
+}
+
+void Mz2500::observe_stack_interrupt_entry() {
+    if (!stack_diag_.enabled || !stack_diag_.entry_seen) return;
+    stack_diag_.isr_active = true;
+    observe_stack_instruction(cpu_.pc, cpu_.sp, false);
 }
 
 size_t Mz2500::debug_json(char* buf, size_t cap) {
@@ -1398,8 +1586,10 @@ void Mz2500::run_frame() {
         const uint64_t step_start = cpu_.cyc;
         step_external_wait_ = 0;
         cpu_step_active_ = true;
+        observe_stack_instruction(cpu_.pc, cpu_.sp, true);
         z80_step(&cpu_);
         cpu_step_active_ = false;
+        observe_stack_instruction(insn_pc_, cpu_.sp, false);
         if (boot_mode_ != 0) {
             const uint64_t elapsed = cpu_.cyc - step_start;
             const uint64_t internal = elapsed >= step_external_wait_
@@ -1411,6 +1601,9 @@ void Mz2500::run_frame() {
             cpu_half_cycle_ = 0;
         }
         service_interrupts();
+        // An NST written by the instruction that just finished takes effect
+        // here, at the instruction boundary, like the external reset line.
+        if (cpu_reset_pending_) reset_cpu_state();
     }
     sync_frame_devices();
     frame_origin_ = end;
