@@ -81,6 +81,26 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## 同梱ディスクイメージ: CP/M 2.2 ハードディスク (`web/dist/cpm.hdd.gz`)
+
+「CP/M」ボタンが起動する [cpm-mz2500](https://github.com/zabaglione/cpm-mz2500)
+のハードディスクイメージ。内容と許諾:
+
+- **CP/M 2.2 本体・DRIユーティリティ・DRI言語製品**（MAC/RMAC/LINK/LIB/XREF/
+  ZSID、Pascal/MT+ 5.6.1、PL/I-80 1.4、CBASIC 2.8）: Digital Research, Inc. の
+  製品。権利承継者 DRDOS, Inc.（Bryan Sparks 氏）による 2022-07-07 の声明
+  "Let this paragraph represent a right to use, distribute, modify, enhance,
+  and otherwise make available in a nonexclusive manner CP/M and its
+  derivatives." により自由に使用・配布・改変可能
+  （[The Unofficial CP/M Web Site](http://www.cpm.z80.de/license.html)）。
+- **BDS C 1.60**: 作者 Leor Zolman 氏が 2002-09-20 にパブリックドメイン化
+  （[bdsoft.com](https://www.bdsoft.com/resources/bdsc.html)）。
+- **MZ-2500用BIOS・ブートコード**: cpm-mz2500 の自作分（MIT License）。
+- コンソールフォントは [dhepper/font8x8](https://github.com/dhepper/font8x8)
+  系譜（パブリックドメイン）。
+
+出自・SHA256 の詳細は cpm-mz2500 リポジトリの LICENSES.md を参照。
+
 ## 参照実装への謝辞（コード非取込）
 
 - **EmuZ-2500 / Common Source Code Project**（武田俊也氏、GPL-2.0）:

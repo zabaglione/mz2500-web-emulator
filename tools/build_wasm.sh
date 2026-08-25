@@ -32,4 +32,17 @@ if [ ! -f build/neko_can_run_demo.d88 ]; then
 fi
 rm -f web/dist/neko_can_run.d88
 cp build/neko_can_run_demo.d88 web/dist/
+# bundled CP/M 2.2 hard disk (gzip; the page inflates it on demand). Built
+# from os/cpm in the dev repo, reused from the committed dist copy in the
+# standalone public repo. gzip -n keeps the archive deterministic.
+if [ ! -f build/cpm.hdd.gz ]; then
+    if [ -f ../os/cpm/build/cpm.hdd ]; then
+        gzip -9 -n -c ../os/cpm/build/cpm.hdd > build/cpm.hdd.gz
+    elif [ -f web/dist/cpm.hdd.gz ]; then
+        cp web/dist/cpm.hdd.gz build/cpm.hdd.gz
+    else
+        echo "no CP/M hard disk available (make cpm-hdd)"; exit 1
+    fi
+fi
+cp build/cpm.hdd.gz web/dist/
 echo "dist ready: web_emulator/web/dist"

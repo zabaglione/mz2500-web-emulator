@@ -9,8 +9,10 @@ export interface Config {
   iplRom?: string;
   kanjiRom?: string;
   dictRom?: string;
+  sasiRom?: string;
   diskA?: string;
   diskB?: string; // path, or "blank"
+  sasiHdd?: string;
   workdir: string;
   autoBoot: boolean;
   bootWait?: string; // text to wait for after boot; default "Ok" on real IPL
@@ -58,8 +60,12 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): Config {
     iplRom: arg(argv, "--ipl-rom") ?? env.MZ2500_IPL_ROM ?? fromRomDir("ipl.rom"),
     kanjiRom: arg(argv, "--kanji-rom") ?? env.MZ2500_KANJI_ROM ?? fromRomDir("kanji.rom"),
     dictRom: arg(argv, "--dict-rom") ?? env.MZ2500_DICT_ROM ?? fromRomDir("dict.rom"),
+    // Opt-in only: an option ROM changes the real-IPL boot order (the ROM
+    // boots before the floppy), so it must never ride in via --rom-dir.
+    sasiRom: arg(argv, "--sasi-rom") ?? env.MZ2500_SASI_ROM,
     diskA: arg(argv, "--disk-a") ?? env.MZ2500_DISK_A,
     diskB,
+    sasiHdd: arg(argv, "--sasi-hdd") ?? env.MZ2500_SASI_HDD,
     workdir: resolve(arg(argv, "--workdir") ?? env.MZ2500_WORKDIR ?? "mz2500-work"),
     autoBoot: !argv.includes("--no-auto-boot"),
     bootWait: arg(argv, "--boot-wait") ?? env.MZ2500_BOOT_WAIT,

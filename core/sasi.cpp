@@ -15,7 +15,18 @@ uint32_t SasiController::infer_block_size(size_t image_size) {
 bool SasiController::load_image(const uint8_t* data, size_t size,
                                 uint32_t block_size) {
     if (!data || size == 0 || size > MAX_IMAGE_SIZE) return false;
-    if (block_size == 0) block_size = infer_block_size(size);
+    const bool auto_size = (block_size == 0);
+    if (auto_size) block_size = infer_block_size(size);
+    // The canonical EH-SASI 256-byte image is exactly the same 22,437,888
+    // bytes as RaSCSI's 1024-byte MZ-1F23 image. Tie-break by content (only
+    // when the caller asked for auto): an enhanced-driver partition-table
+    // signature at 256-byte LAD 3 marks a 256-byte image ("EHSASI " plus a
+    // YYYYMMDD format stamp). An explicit block size always wins.
+    if (auto_size && size == 22437888u && block_size == 1024) {
+        static const uint8_t kSignature[7] = {'E', 'H', 'S', 'A', 'S', 'I', ' '};
+        if (std::memcmp(data + 3 * 256, kSignature, sizeof(kSignature)) == 0)
+            block_size = 256;
+    }
     if ((block_size != 256 && block_size != 512 && block_size != 1024) ||
         size % block_size != 0)
         return false;

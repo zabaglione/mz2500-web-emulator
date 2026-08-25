@@ -13,6 +13,12 @@ interface WasmModule {
   _emu_init(rate: number): number;
   _emu_insert_disk(drive: number, ptr: number, size: number): number;
   _emu_insert_blank_disk(drive: number): number;
+  _emu_sasi_insert(ptr: number, size: number, blockSize: number): number;
+  _emu_sasi_loaded(): number;
+  _emu_sasi_block_size(): number;
+  _emu_sasi_snapshot(): number;
+  _emu_sasi_data(): number;
+  _emu_sasi_dirty(): number;
   _emu_disk_dirty(drive: number): number;
   _emu_disk_snapshot(drive: number): number;
   _emu_disk_data(): number;
@@ -45,7 +51,7 @@ interface WasmModule {
   UTF8ToString(ptr: number): string;
 }
 
-export const ROM_KIND = { ipl: 0, kanji: 2, dict: 3 } as const;
+export const ROM_KIND = { ipl: 0, kanji: 2, dict: 3, sasi_bios: 4 } as const;
 export type RomKind = keyof typeof ROM_KIND;
 
 export interface TypeOptions {
@@ -147,6 +153,35 @@ export class Emulator {
 
   insertBlankDisk(drive: number): void {
     if (!this.m._emu_insert_blank_disk(drive)) throw new Error("blank insert failed");
+  }
+
+  // SASI hard disk (MZ-1E30). blockSize 0 = auto (an EH-SASI partition
+  // signature tie-breaks the 22,437,888-byte RaSCSI collision); pass 256
+  // explicitly for canonical CP/M images to be safe.
+  insertHdd(path: string, blockSize = 0): void {
+    const bytes = readFileSync(path);
+    this.withBuffer(bytes, (ptr) => {
+      if (!this.m._emu_sasi_insert(ptr, bytes.length, blockSize))
+        throw new Error(`SASI image rejected: ${path}`);
+    });
+  }
+
+  hddLoaded(): boolean {
+    return this.m._emu_sasi_loaded() !== 0;
+  }
+
+  hddBlockSize(): number {
+    return this.m._emu_sasi_block_size();
+  }
+
+  hddImage(): Buffer {
+    const size = this.m._emu_sasi_snapshot();
+    const ptr = this.m._emu_sasi_data();
+    return Buffer.from(this.m.HEAPU8.subarray(ptr, ptr + size));
+  }
+
+  hddDirty(): boolean {
+    return this.m._emu_sasi_dirty() !== 0;
   }
 
   diskImage(drive: number): Buffer {

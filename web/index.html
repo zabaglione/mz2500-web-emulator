@@ -163,6 +163,11 @@
     <p class="fine">Mount a raw HDF image. The target implements SASI bus phases,
       automatic A4h ACK handshakes, six-byte commands, read/write/format, sense,
       and the optional A8h/A9h BIOS ROM window. Images stay in this browser.</p>
+    <p class="fine">前面パネルの「CP/M」ボタンは、付属のCP/M 2.2ハードディスク
+      イメージをこのスロットへマウントして起動します（EH-SASI形式の
+      パーティション表を内蔵IPLが直接読むため、ROM不要）。イメージ単体は
+      <a href="https://github.com/zabaglione/cpm-mz2500" target="_blank"
+      rel="noopener">cpm-mz2500</a> で配布しています。</p>
     <output id="sasi-state">POWER OFF</output>
     <div class="sasi-row">
       <label>Block <select id="sasi-block">
@@ -428,6 +433,16 @@
             <path d="M9 10v6m-3-3h6"/><circle cx="22" cy="12" r="1"/><circle cx="25" cy="15" r="1"/>
           </svg>
           <span class="game-launch-copy"><strong>NEKO</strong><small>GAME</small></span>
+        </button>
+        <button id="cpm-btn" class="panel-toggle game-launch" type="button"
+          aria-label="Boot CP/M 2.2 from the bundled hard disk"
+          data-tooltip="2500モードへ切り替え、ハードディスクからCP/M 2.2を起動する。HDDへの書き込みはブラウザに保存され、次回も続きから使えます">
+          <svg class="game-launch-icon" viewBox="0 0 32 24" aria-hidden="true">
+            <rect x="3" y="4" width="26" height="16" rx="2"/>
+            <circle cx="13" cy="12" r="5"/><circle cx="13" cy="12" r="1"/>
+            <path d="M13 7a5 5 0 0 1 5 5l3 3"/><path d="M25 8v2m0 4v2"/>
+          </svg>
+          <span class="game-launch-copy"><strong>CP/M</strong><small>OS</small></span>
         </button>
         <button id="tenkey-btn" class="panel-toggle" type="button" aria-pressed="false"
           data-tooltip="カーソルキーをテンキーとして送る">T.KEY</button>

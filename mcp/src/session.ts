@@ -26,9 +26,11 @@ export class Session {
     if (config.iplRom) emu.loadRom("ipl", config.iplRom);
     if (config.kanjiRom) emu.loadRom("kanji", config.kanjiRom);
     if (config.dictRom) emu.loadRom("dict", config.dictRom);
+    if (config.sasiRom) emu.loadRom("sasi_bios", config.sasiRom);
     if (config.diskA) emu.insertDisk(0, config.diskA);
     if (config.diskB === "blank") emu.insertBlankDisk(1);
     else if (config.diskB) emu.insertDisk(1, config.diskB);
+    if (config.sasiHdd) emu.insertHdd(config.sasiHdd, 256);
 
     if (config.autoBoot && (config.diskA || emu.hasIplRom())) {
       const mode: BootMode = emu.hasIplRom() ? "real" : "dummy";

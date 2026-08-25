@@ -91,23 +91,10 @@ void Mz2500::reset_peripherals_for_boot() {
     cpu_reset_pending_ = false;
 }
 
-bool Mz2500::boot_from_disk() {
-    D88Disk& boot_disk = disks_[0]; // the IPL boots from drive FD1
-    if (!boot_disk.loaded()) {
-        std::fprintf(stderr, "[ipl] no disk mounted\n");
-        return false;
-    }
-
-    uint8_t header[D88Disk::SECTOR_SIZE];
-    if (!boot_disk.read_decoded(0, 1, 1, header, sizeof(header))) {
-        std::fprintf(stderr, "[ipl] cannot read boot header sector (C=0 H=1 R=1)\n");
-        return false;
-    }
-    if (header[0] != 0x01 || std::memcmp(header + 1, "IPLPRO", 6) != 0) {
-        std::fprintf(stderr, "[ipl] not a bootable disk (IPLPRO signature missing)\n");
-        return false;
-    }
-
+bool Mz2500::native_boot_with_header(
+    const uint8_t* header,
+    const std::function<bool(int, int, uint8_t*)>& load_bank,
+    const char* source_name) {
     mem_.clear(); // native bootstrap policy: clear main RAM, VRAM, and PCG
     real_ipl_ram_init_pending_ = false;
     reset_peripherals_for_boot();
@@ -167,21 +154,10 @@ bool Mz2500::boot_from_disk() {
 
     for (int index = 0; index < payload_count; index++) {
         uint8_t* dest = mem_.bank_ptr(payload_banks[index]);
-        const bool legacy_single_bank = payload_count == 1;
-        const int first_cylinder = legacy_single_bank ? 0 : index;
-        const int second_cylinder = legacy_single_bank ? 1 : index + 1;
-        const int second_side = legacy_single_bank ? 0 : 1;
-        for (int r = 1; r <= D88Disk::SECTORS_PER_TRACK; r++) {
-            if (!boot_disk.read_decoded(first_cylinder, 0, r,
-                                        dest + (r - 1) * D88Disk::SECTOR_SIZE,
-                                        D88Disk::SECTOR_SIZE))
-                return false;
-            if (!boot_disk.read_decoded(
-                    second_cylinder, second_side, r,
-                    dest + (D88Disk::SECTORS_PER_TRACK + r - 1) *
-                        D88Disk::SECTOR_SIZE,
-                    D88Disk::SECTOR_SIZE))
-                return false;
+        if (!load_bank(index, payload_count, dest)) {
+            std::fprintf(stderr, "[ipl] payload bank %d unreadable (%s)\n",
+                         index, source_name);
+            return false;
         }
     }
 
@@ -211,13 +187,112 @@ bool Mz2500::boot_from_disk() {
         char title[13] = {};
         std::memcpy(title, header + 7, 12);
         std::fprintf(stderr,
-                     "[ipl] IPLPRO \"%s\" -> %d x 8KB, entry bank %02Xh, blocks "
-                     "0-6 = %02X %02X %02X %02X %02X %02X %02X, PC=%04Xh\n",
-                     title, payload_count, payload_banks[payload_count - 1],
+                     "[ipl] IPLPRO \"%s\" (%s) -> %d x 8KB, entry bank %02Xh, "
+                     "blocks 0-6 = %02X %02X %02X %02X %02X %02X %02X, PC=%04Xh\n",
+                     title, source_name, payload_count,
+                     payload_banks[payload_count - 1],
                      header[0x30], header[0x31], header[0x32],
                      header[0x33], header[0x34], header[0x35], header[0x36], cpu_.pc);
     }
     return true;
+}
+
+bool Mz2500::boot_from_disk() {
+    D88Disk& boot_disk = disks_[0]; // the IPL boots from drive FD1
+    uint8_t header[D88Disk::SECTOR_SIZE];
+    bool fd_bootable = boot_disk.loaded();
+    if (fd_bootable && !boot_disk.read_decoded(0, 1, 1, header, sizeof(header))) {
+        std::fprintf(stderr, "[ipl] cannot read boot header sector (C=0 H=1 R=1)\n");
+        fd_bootable = false;
+    }
+    if (fd_bootable &&
+        (header[0] != 0x01 || std::memcmp(header + 1, "IPLPRO", 6) != 0)) {
+        std::fprintf(stderr, "[ipl] not a bootable disk (IPLPRO signature missing)\n");
+        fd_bootable = false;
+    }
+    if (!fd_bootable) {
+        // No bootable floppy: fall back to the SASI hard disk, like a
+        // machine whose option ROM boots the priority partition.
+        if (boot_from_sasi_hdd()) return true;
+        if (!boot_disk.loaded())
+            std::fprintf(stderr, "[ipl] no bootable floppy or hard disk\n");
+        return false;
+    }
+
+    auto load_bank = [&](int index, int payload_count, uint8_t* dest) -> bool {
+        const bool legacy_single_bank = payload_count == 1;
+        const int first_cylinder = legacy_single_bank ? 0 : index;
+        const int second_cylinder = legacy_single_bank ? 1 : index + 1;
+        const int second_side = legacy_single_bank ? 0 : 1;
+        for (int r = 1; r <= D88Disk::SECTORS_PER_TRACK; r++) {
+            if (!boot_disk.read_decoded(first_cylinder, 0, r,
+                                        dest + (r - 1) * D88Disk::SECTOR_SIZE,
+                                        D88Disk::SECTOR_SIZE))
+                return false;
+            if (!boot_disk.read_decoded(
+                    second_cylinder, second_side, r,
+                    dest + (D88Disk::SECTORS_PER_TRACK + r - 1) *
+                        D88Disk::SECTOR_SIZE,
+                    D88Disk::SECTOR_SIZE))
+                return false;
+        }
+        return true;
+    };
+    return native_boot_with_header(header, load_bank, "FD1");
+}
+
+bool Mz2500::boot_from_sasi_hdd() {
+    if (!sasi_.loaded() || sasi_.block_size() != 256) return false;
+    const std::vector<uint8_t>& image = sasi_.image();
+    auto block = [&](uint32_t lba) -> const uint8_t* {
+        const size_t offset = size_t(lba) * 256;
+        return offset + 256 <= image.size() ? image.data() + offset : nullptr;
+    };
+
+    // partition table at LAD 3: "EHSASI " signature, then 16-byte entries
+    // (CTRL bit7 = priority boot, ID bit mask, TOP-LUN<<5, TOP-LAD hi/mid/lo)
+    const uint8_t* table = block(3);
+    if (!table || std::memcmp(table, "EHSASI ", 7) != 0) return false;
+    uint32_t base = 0;
+    bool found = false;
+    for (int entry = 0; entry < 15; entry++) {
+        const uint8_t* e = table + 0x10 + entry * 16;
+        if (!(e[0] & 0x80)) continue;   // not the priority-boot partition
+        if (e[3] == 0) continue;        // no target ID: inactive entry
+        if (e[4] != 0) continue;        // flat image: LUN 0 only
+        base = (uint32_t(e[5]) << 16) | (uint32_t(e[6]) << 8) | e[7];
+        found = true;
+        break;
+    }
+    if (!found) {
+        std::fprintf(stderr, "[ipl] hard disk has no priority-boot partition\n");
+        return false;
+    }
+
+    const uint8_t* record0 = block(base);
+    if (!record0 || record0[0] != 0x01 ||
+        std::memcmp(record0 + 1, "IPLPRO", 6) != 0) {
+        std::fprintf(stderr,
+                     "[ipl] partition at LAD %06Xh is not bootable (no IPLPRO)\n",
+                     base);
+        return false;
+    }
+    uint8_t header[256];
+    std::memcpy(header, record0, sizeof(header));
+
+    // measured device-boot contract: one contiguous run of banks*32
+    // records starting at the header's start-record field (+1Eh)
+    const uint32_t start = header[0x1E] | (uint32_t(header[0x1F]) << 8);
+    auto load_bank = [&](int index, int, uint8_t* dest) -> bool {
+        const uint32_t first = base + start + uint32_t(index) * 32;
+        for (int s = 0; s < 32; s++) {
+            const uint8_t* src = block(first + s);
+            if (!src) return false;
+            std::memcpy(dest + s * 256, src, 256);
+        }
+        return true;
+    };
+    return native_boot_with_header(header, load_bank, "SASI HD");
 }
 
 bool Mz2500::boot_with_real_ipl() {

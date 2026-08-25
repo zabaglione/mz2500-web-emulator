@@ -340,6 +340,40 @@ export function buildServer(session: Session, spectatorUrl?: string | null): Mcp
   );
 
   server.registerTool(
+    "insert_hdd",
+    {
+      title: "Insert a SASI hard-disk image",
+      description:
+        "Mount a raw SASI image (MZ-1E30 target). blockSize 0 = auto with the EH-SASI " +
+        "signature tie-break; pass 256 for canonical CP/M images. Booting from it needs " +
+        "the real IPL plus the SASI option ROM (sasirom.bin) and a reset.",
+      inputSchema: {
+        path: z.string().describe("Host path to a raw hard-disk image"),
+        blockSize: z.number().int().optional().describe("0(auto)/256/512/1024, default 256"),
+      },
+    },
+    async ({ path, blockSize }) => {
+      emu.insertHdd(path, blockSize ?? 256);
+      return text(`sasi: ${path} mounted (block=${emu.hddBlockSize()})`);
+    },
+  );
+
+  server.registerTool(
+    "export_hdd",
+    {
+      title: "Export the SASI hard-disk image",
+      description: "Write the current SASI image into the workdir (persists CP/M C:/D: writes).",
+      inputSchema: {},
+    },
+    async () => {
+      if (!emu.hddLoaded()) throw new Error("no SASI image mounted");
+      const image = emu.hddImage();
+      const path = session.saveArtefact("sasi", "hdd", image);
+      return text(`saved: ${path} (${image.length} bytes, dirty=${emu.hddDirty()})`);
+    },
+  );
+
+  server.registerTool(
     "reset",
     {
       title: "Reboot the machine",

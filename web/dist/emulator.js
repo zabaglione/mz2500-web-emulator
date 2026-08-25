@@ -136,6 +136,7 @@ const masterVolumeEl = document.getElementById("master-volume");
 const driveBayEl = document.getElementById("drivebay");
 const panelDetailBtn = document.getElementById("panel-detail-btn");
 const nekoDemoBtn = document.getElementById("neko-demo-btn");
+const cpmHddBtn = document.getElementById("cpm-btn");
 
 let panelDetailed = localStorage.getItem("mzw_panel_detail") === "1";
 
@@ -2085,14 +2086,20 @@ async function iplBoot(options = {}) {
   const wantRealIpl = hasIpl &&
     (diskProfile === 2 ||
      (!options.forceDummyIpl && (realIplEl.checked || requestedBootMode !== 0)));
-  if (!drives[0] && !wantRealIpl) {
+  // Floppy-less boot is allowed when a SASI disk is mounted: the dummy IPL
+  // falls back to the EH-SASI partition table and boots the priority
+  // partition natively (no option ROM needed).
+  const sasiPresent = Module._emu_sasi_loaded() !== 0;
+  if (!drives[0] && !wantRealIpl && !sasiPresent) {
     stopAtIplPrompt("READY - NO DISK (INSERT D88, THEN PRESS IPL)");
     return false;
   }
   const ok = wantRealIpl ? Module._emu_boot_real_ipl()
-                         : (drives[0] ? Module._emu_boot() : 0);
+                         : ((drives[0] || sasiPresent) ? Module._emu_boot() : 0);
   if (!ok) {
-    stopAtIplPrompt(wantRealIpl ? "REAL IPL DID NOT START" : "NOT A BOOTABLE DISK");
+    stopAtIplPrompt(wantRealIpl ? "REAL IPL DID NOT START"
+                    : drives[0] ? "NOT A BOOTABLE DISK"
+                                : "HARD DISK IS NOT BOOTABLE");
     return false;
   }
   applyAdpcmHostSettings();
@@ -2310,6 +2317,99 @@ function loadNekoDemo() {
       nekoDemoPromise = null;
     });
   return nekoDemoPromise;
+}
+
+// ---- bundled CP/M 2.2 hard disk -----------------------------------------
+// One click mounts the bundled, gzip-compressed SASI image and boots it
+// through the dummy IPL's native EH-SASI partition boot (no ROMs needed).
+// The mounted disk lives in the regular SASI slot, so every write persists
+// to IndexedDB and the next launch continues from the saved image.
+const CPM_HDD_NAME = "cpm.hdd";
+let cpmHddPromise = null;
+
+async function fetchCpmHddImage() {
+  const v = encodeURIComponent(window.BUILD_ID || "dev");
+  const resp = await fetch("cpm.hdd.gz?v=" + v);
+  if (!resp.ok) throw new Error(`CP/M HDD fetch failed: ${resp.status}`);
+  const raw = new Uint8Array(await resp.arrayBuffer());
+  if (raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b) {
+    const stream = new Blob([raw]).stream()
+      .pipeThrough(new DecompressionStream("gzip"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  return raw; // a proxy already removed the gzip layer
+}
+
+function launchCpmHdd() {
+  if (cpmHddPromise) return cpmHddPromise;
+  cpmHddBtn.disabled = true;
+  cpmHddBtn.setAttribute("aria-busy", "true");
+
+  // Explicit MZ-2500 action: make the mode switch visible and persistent,
+  // same as the NEKO button.
+  bootModeEl.value = "0";
+  localStorage.setItem("mzw_boot_mode", "0");
+
+  cpmHddPromise = (async () => {
+    await ensurePowerOn();
+    if (!Module) return;
+    Module._emu_set_boot_mode(0);
+    // CP/M drives by board: C:/D: need the SASI interface, E: the EMM.
+    for (const id of ["hw-sasi", "hw-emm"]) {
+      const el = document.getElementById(id);
+      if (!el.checked) {
+        el.checked = true;
+        el.dispatchEvent(new Event("change"));
+      }
+    }
+    // The SASI slot is single: ask before replacing a foreign image, and
+    // reuse a stored CP/M disk so the user's files survive relaunches.
+    if (sasiMedia && sasiMedia.name !== CPM_HDD_NAME) {
+      const replace = window.confirm(
+        `SASIスロットには別のイメージ (${sasiMedia.name}) が入っています。\n` +
+        "CP/M用ハードディスクに入れ替えますか？\n" +
+        "（現在のイメージはブラウザ保存から消えます。残したい場合は先に" +
+        "「Save HDF」で書き出してください）");
+      if (!replace) {
+        statusEl.textContent = "CP/M LAUNCH CANCELLED";
+        return;
+      }
+      await flushSasiPersist();
+      sasiMedia = null;
+    }
+    if (!sasiMedia) {
+      statusEl.textContent = "LOADING CP/M HDD...";
+      sasiMedia = {
+        name: CPM_HDD_NAME,
+        bytes: await fetchCpmHddImage(),
+        blockSize: 256,
+        wp: false,
+        inserted: true,
+        target: 0,
+      };
+      sasiTargetEl.value = "0";
+    }
+    sasiMedia.inserted = true;
+    if (!mountSasiMedia()) {
+      statusEl.textContent = "CP/M HDD MOUNT FAILED";
+      return;
+    }
+    // A bootable floppy in FD1 would win the boot order; set it aside
+    // (the browser-stored copy is kept and comes back on the next reload).
+    if (drives[0]) ejectDrive(0, { clearStored: false });
+    statusEl.textContent = "BOOTING CP/M...";
+    await iplBoot({ forceDummyIpl: true });
+  })()
+    .catch((error) => {
+      console.error("CP/M launch failed", error);
+      statusEl.textContent = "CP/M LAUNCH FAILED";
+    })
+    .finally(() => {
+      cpmHddBtn.disabled = false;
+      cpmHddBtn.removeAttribute("aria-busy");
+      cpmHddPromise = null;
+    });
+  return cpmHddPromise;
 }
 
 function pumpAudio() {
@@ -2706,6 +2806,7 @@ document.getElementById("power").addEventListener("click", () => {
   ensurePowerOn().catch(() => {});
 });
 nekoDemoBtn.addEventListener("click", loadNekoDemo);
+cpmHddBtn.addEventListener("click", launchCpmHdd);
 
 // ---- debug panel ----------------------------------------------------------
 const debugToggle = document.getElementById("debug-toggle");

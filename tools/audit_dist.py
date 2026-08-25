@@ -22,7 +22,7 @@ ROM_DIR_CANDIDATES = [REPO / "roms" / "mz2500", REPO.parent.parent.parent / "rom
 
 EXPECTED = {
     "index.html", "style.css", "emulator.js", "audio-worklet.js",
-    "mz2500w.js", "mz2500w.wasm", "neko_can_run_demo.d88",
+    "mz2500w.js", "mz2500w.wasm", "neko_can_run_demo.d88", "cpm.hdd.gz",
 }
 
 
@@ -49,6 +49,11 @@ def main() -> None:
         print("rom scan SKIPPED (no local roms/mz2500; nothing to compare against)")
     else:
         dist_blobs = [(p.name, p.read_bytes()) for p in sorted(DIST.iterdir()) if p.is_file()]
+        # scan compressed payloads in their inflated form too - ROM bytes
+        # hidden under gzip would slip past a raw byte scan
+        import gzip as _gzip
+        dist_blobs += [(f"{name} (inflated)", _gzip.decompress(blob))
+                       for name, blob in list(dist_blobs) if name.endswith(".gz")]
         windows = 0
         for rom in sorted(rom_dir.glob("*.rom")):
             data = rom.read_bytes()
@@ -74,6 +79,15 @@ def main() -> None:
         print("d88 provenance OK (bit-identical --demo rebuild from repo sources)")
     else:
         print("d88 provenance SKIPPED (game sources not present; standalone checkout)")
+
+    cpm_hdd = REPO / "os/cpm/build/cpm.hdd"
+    if cpm_hdd.is_file():
+        import gzip
+        if gzip.decompress((DIST / "cpm.hdd.gz").read_bytes()) != cpm_hdd.read_bytes():
+            fail("dist cpm.hdd.gz does not match os/cpm/build/cpm.hdd")
+        print("cpm.hdd provenance OK (matches the os/cpm build)")
+    else:
+        print("cpm.hdd provenance SKIPPED (os/cpm build not present; standalone checkout)")
 
     print("AUDIT PASSED")
 

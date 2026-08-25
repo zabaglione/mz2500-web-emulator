@@ -204,11 +204,17 @@ void usage() {
         "  --disk-b PATH         mount a D88 image in drive 1 (FD2)\n"
         "  --disk-b-blank        put an unformatted blank disk in drive 1 (FD2)\n"
         "  --disk-save N:PATH    write drive N's image out at exit (write tests)\n"
+        "  --hdf PATH            mount a raw SASI hard-disk image (MZ-1E30)\n"
+        "  --hdf-block N         SASI block size: 0=auto (default), 256, 512, 1024\n"
+        "  --hdf-save PATH       write the SASI image out at exit (write tests)\n"
+        "  --sasi-rom PATH       load a SASI option BIOS ROM (A8h/A9h window;\n"
+        "                        opt-in: it changes the real-IPL boot order)\n"
         "  --frames N            run N emulated frames (default 600)\n"
         "  --ram-fill BYTE       test-only fill main RAM 00h-1Fh before disk boot (hex)\n  --no-pit              test-only: mute the 8253 ch0 interrupt (real-HW mimic)\n"
         "  --trace-boot          log dummy-IPL and boot progress\n"
         "  --strict-gcrtc        report SuperMZ G-CRTC writes outside VBLANK\n"
         "  --cpu-report          print CPU state at exit\n"
+        "  --screen-report       print the final text screen to stdout ('screen:' lines)\n"
         "  --crtc-report         print TEXT CRTC f6/f7/$00-0a/$0f at exit\n"
         "  --stack-report        measure runtime SP and writes below CFB0h\n"
         "  --stack-guard ADDR   override stack guard (hex, default CFB0)\n"
@@ -251,6 +257,7 @@ void usage() {
         "  --trace-opn PATH      log every OPN register write as cycle,reg,value\n"
         "  --no-adpcm            remove the MZ-1E35 ADPCM board (ports 98h/99h)\n"
         "  --no-emm              remove the MZ-1R37 640K EMM (ports ACh/ADh)\n"
+        "  --no-sasi             remove the MZ-1E30 SASI interface (ports A4h/A5h)\n"
         "  --no-exp-ram-alias    diagnostic: mirror absent 10h-1Fh onto 00h-0Fh\n"
         "  --boot-mode N         rear-panel MODE selector: 0=MZ-2500 (default),\n"
         "                        1=MZ-2000, 2=MZ-80B (legacy modes need --rom-dir\n"
@@ -281,6 +288,12 @@ int main(int argc, char** argv) {
     bool disk_b_blank = false;
     int disk_save_drive = -1;
     std::string disk_save_path;
+    std::string hdf_path;
+    std::string hdf_save_path;
+    std::string sasi_rom_path;
+    long hdf_block = 0; // 0 = auto (SasiController's size heuristic)
+    bool no_sasi = false;
+    bool screen_report = false;
     long frames = 600;
     bool trace_boot = false;
     bool strict_gcrtc = false;
@@ -733,6 +746,30 @@ int main(int argc, char** argv) {
             no_adpcm = true;
         } else if (arg == "--no-emm") {
             no_emm = true;
+        } else if (arg == "--no-sasi") {
+            no_sasi = true;
+        } else if (arg == "--hdf") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            hdf_path = v;
+        } else if (arg == "--hdf-block") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            hdf_block = std::strtol(v, nullptr, 10);
+            if (hdf_block != 0 && hdf_block != 256 && hdf_block != 512 && hdf_block != 1024) {
+                std::fprintf(stderr, "--hdf-block wants 0 (auto), 256, 512 or 1024\n");
+                return 2;
+            }
+        } else if (arg == "--hdf-save") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            hdf_save_path = v;
+        } else if (arg == "--sasi-rom") {
+            const char* v = value();
+            if (!v) { usage(); return 2; }
+            sasi_rom_path = v;
+        } else if (arg == "--screen-report") {
+            screen_report = true;
         } else if (arg == "--fm-lpf-hz") {
             const char* v = value();
             if (!v) { usage(); return 2; }
@@ -754,10 +791,13 @@ int main(int argc, char** argv) {
     // A run that only wants a blank disk formatted and saved back out (the
     // write tests' use case) has no boot disk and no IPL to run - disk_a is
     // only mandatory for the normal boot-and-run path.
-    if (disk_a.empty() && !disk_b_blank) {
+    if (disk_a.empty() && !disk_b_blank && hdf_path.empty() && !real_ipl) {
         usage();
         return 2;
     }
+    // FD-less --hdf runs boot straight from the hard disk: the real IPL
+    // via the SASI option ROM when --real-ipl is given, otherwise the
+    // dummy IPL's native hard-disk bootstrap.
     // --disk-b loads an image into drive 1; --disk-b-blank immediately
     // replaces drive 1 with an unformatted disk. Together they'd silently
     // discard whichever the caller thought would win, so reject the
@@ -804,6 +844,7 @@ int main(int argc, char** argv) {
     if (no_mz1m10) machine.set_hw_option(2, false);
     if (no_adpcm) machine.set_hw_option(3, false);
     if (no_emm) machine.set_hw_option(4, false);
+    if (no_sasi) machine.set_hw_option(5, false);
     if (!rom_dir.empty()) {
         static const struct { const char* file; int kind; } roms[] = {
             {"ipl.rom", 0}, {"kanji.rom", 2}, {"dict.rom", 3}};
@@ -819,6 +860,60 @@ int main(int argc, char** argv) {
                 machine.set_rom(r.kind, bytes.data(), bytes.size());
             std::fclose(f);
         }
+    }
+    // The SASI option BIOS ROM is opt-in: with it present the real IPL
+    // boots the option ROM FIRST, which would change every plain-FD
+    // real-IPL run (menus, HD probes), so it never auto-loads.
+    if (!sasi_rom_path.empty()) {
+        FILE* f = std::fopen(sasi_rom_path.c_str(), "rb");
+        if (!f) {
+            std::fprintf(stderr, "cannot read %s\n", sasi_rom_path.c_str());
+            return 1;
+        }
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        std::vector<uint8_t> bytes(size > 0 ? size : 0);
+        const bool ok =
+            size > 0 && std::fread(bytes.data(), 1, size, f) == (size_t)size;
+        std::fclose(f);
+        if (!ok) {
+            std::fprintf(stderr, "cannot load SASI ROM %s\n", sasi_rom_path.c_str());
+            return 1;
+        }
+        machine.set_rom(4, bytes.data(), bytes.size());
+    }
+    if (!hdf_path.empty()) {
+        FILE* f = std::fopen(hdf_path.c_str(), "rb");
+        if (!f) {
+            std::fprintf(stderr, "cannot read %s\n", hdf_path.c_str());
+            return 1;
+        }
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        std::vector<uint8_t> bytes(size > 0 ? size : 0);
+        const bool read_ok =
+            size > 0 && std::fread(bytes.data(), 1, size, f) == (size_t)size;
+        std::fclose(f);
+        // The auto heuristic treats exactly 22,437,888 bytes as a 1024-byte
+        // RaSCSI MZ-1F23 image - but that is also the canonical EH-SASI
+        // 256-byte image size, so auto cannot tell them apart.
+        if (hdf_block == 0 && size == 22437888) {
+            std::fprintf(stderr,
+                         "warning: %ld bytes is both the RaSCSI MZ-1F23 (1024B) and the "
+                         "EH-SASI (256B) image size; auto picks 1024. Pass --hdf-block 256 "
+                         "for EH-SASI images.\n",
+                         size);
+        }
+        if (!read_ok ||
+            !machine.insert_sasi_image(bytes.data(), bytes.size(),
+                                       static_cast<uint32_t>(hdf_block))) {
+            std::fprintf(stderr, "cannot mount %s as a SASI image\n", hdf_path.c_str());
+            return 1;
+        }
+        std::printf("sasi: mounted %ld bytes block=%u (%s)\n", size,
+                    machine.sasi_block_size(), hdf_block == 0 ? "auto" : "explicit");
     }
 
     if (!disk_a.empty() && !machine.insert_disk(0, disk_a)) return 1;
@@ -846,6 +941,16 @@ int main(int argc, char** argv) {
     };
     if (!disk_a.empty()) {
         if (!boot_disk()) return 1;
+    } else if (real_ipl) {
+        // FD-less boot: the real IPL scans for boot devices itself (SASI
+        // option ROM through the A8h/A9h window, or an empty drive prompt).
+        if (!machine.boot_with_real_ipl()) {
+            std::fprintf(stderr, "REAL IPL BOOT FAILED (need --rom-dir with ipl.rom)\n");
+            return 1;
+        }
+    } else if (machine.sasi_loaded()) {
+        // FD-less, ROM-less: the dummy IPL boots the hard disk natively.
+        if (!machine.boot_from_disk()) return 1;
     }
 
     std::vector<int> trace_last(trace_addrs.size(), -1);
@@ -1129,6 +1234,21 @@ int main(int argc, char** argv) {
         std::printf("gcrtc: strict=1 vblank_violations=%llu\n",
                     (unsigned long long)machine.gde_vblank_violations());
     }
+    if (screen_report) {
+        // 80x25 cells, up to 3 UTF-8 bytes each plus newlines: 16KB is ample.
+        std::vector<char> text(16384);
+        const size_t len = machine.screen_text(text.data(), text.size());
+        std::string line;
+        for (size_t p = 0; p < len; p++) {
+            if (text[p] == '\n') {
+                std::printf("screen: %s\n", line.c_str());
+                line.clear();
+            } else {
+                line.push_back(text[p]);
+            }
+        }
+        if (!line.empty()) std::printf("screen: %s\n", line.c_str());
+    }
     if (disk_save_drive >= 0 && !disk_save_path.empty()) {
         const std::vector<uint8_t> image = machine.disk_image(disk_save_drive);
         FILE* f = std::fopen(disk_save_path.c_str(), "wb");
@@ -1139,6 +1259,18 @@ int main(int argc, char** argv) {
         std::fwrite(image.data(), 1, image.size(), f);
         std::fclose(f);
         std::printf("wrote %s (%zu bytes)\n", disk_save_path.c_str(), image.size());
+    }
+    if (!hdf_save_path.empty()) {
+        const std::vector<uint8_t>& image = machine.sasi_image();
+        FILE* f = std::fopen(hdf_save_path.c_str(), "wb");
+        if (!f) {
+            std::fprintf(stderr, "cannot write %s\n", hdf_save_path.c_str());
+            return 1;
+        }
+        std::fwrite(image.data(), 1, image.size(), f);
+        std::fclose(f);
+        std::printf("wrote %s (%zu bytes) dirty=%d\n", hdf_save_path.c_str(),
+                    image.size(), machine.sasi_dirty() ? 1 : 0);
     }
     return 0;
 }

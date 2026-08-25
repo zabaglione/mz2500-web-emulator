@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -105,8 +106,17 @@ public:
     // Native replacement for the IPL ROM boot sequence ("dummy IPL"):
     // interprets the IPLPRO header on the mounted disk and starts the CPU at
     // the load address, with the initial device state the real IPL leaves
-    // behind. Implemented in core/dummy_ipl.cpp.
+    // behind. When drive FD1 has no bootable disk it falls back to the SASI
+    // hard disk (boot_from_sasi_hdd). Implemented in core/dummy_ipl.cpp.
     bool boot_from_disk();
+
+    // Native bootstrap for the SASI hard disk, no ROMs involved: find the
+    // priority partition in the EH-SASI-format table (LAD 3), read its
+    // IPLPRO record at partition record 0, then load banks*32 contiguous
+    // 256-byte records starting at the header's start-record field - the
+    // device-boot contract measured from the real firmware
+    // (docs/research/mz2500-eh-sasi-boot-contract.md).
+    bool boot_from_sasi_hdd();
 
     // Front-panel RESET: pulse only the Z80 reset input. Unlike IPL, this
     // deliberately preserves RAM, bank mapping, video state, and peripheral
@@ -574,6 +584,13 @@ public:
     void dump_forensics(const char* why);
 
 private:
+    // shared tail of the native (ROM-less) boot paths: peripheral
+    // bootstrap, payload-bank list parsing, block map and CPU start.
+    // load_bank(index, payload_count, dest) fills one 8KB bank image.
+    bool native_boot_with_header(
+        const uint8_t* header,
+        const std::function<bool(int, int, uint8_t*)>& load_bank,
+        const char* source_name);
     // Reset CPU-external device state shared by both boot paths. Firmware
     // handoff values belong in boot_from_disk(), after this boot baseline;
     // boot_with_real_ipl() must let the ROM establish them itself, except for
