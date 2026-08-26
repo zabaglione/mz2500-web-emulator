@@ -2388,6 +2388,24 @@ function launchCpmHdd() {
         target: 0,
       };
       sasiTargetEl.value = "0";
+    } else {
+      // Returning user: the bundled system may be newer than the stored
+      // disk. Offer a PUTSYS-style refresh - the boot area (records
+      // 32-111) only, so every file on C:/D: survives untouched.
+      try {
+        const bundled = await fetchCpmHddImage();
+        const lo = 32 * 256, hi = 112 * 256;
+        const stored = sasiMedia.bytes;
+        if (stored.length === bundled.length) {
+          let same = true;
+          for (let i = lo; same && i < hi; i++) same = stored[i] === bundled[i];
+          if (!same && window.confirm(
+              "CP/Mシステムの新しい版があります。ハードディスクのシステム領域" +
+              "だけ更新しますか？\n（保存されているファイルはそのまま残ります）")) {
+            stored.set(bundled.subarray(lo, hi), lo);
+          }
+        }
+      } catch (e) { /* offline: reusing the stored image as-is is fine */ }
     }
     sasiMedia.inserted = true;
     if (!mountSasiMedia()) {
