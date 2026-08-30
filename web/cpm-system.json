@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "version": "v1.3.2",
+  "hddSize": 22437888,
+  "hddSha256": "2a9f36bb251ecf76e7701a2524eb7f74c0745619f7a1bd8d641abb6c2a3a2844",
+  "systemOffset": 8192,
+  "systemLength": 20480,
+  "systemSha256": "0e1fa75ce5fd5a92931ee3b0f294fe875cf1841a6800cf7c515a8916d89a0b8c",
+  "upgradeFrom": [
+    {
+      "versions": ["v1.0.0", "v1.1.0"],
+      "systemSha256": "556631edf8a4c87923ecb1a856648926eca77c1d62cab60c2cf9f1b7a55dfc02"
+    },
+    {
+      "versions": ["v1.2.0"],
+      "systemSha256": "21907f7d2748d7e06c77c4ed8764c5bb31c6c16918ee77a617d310091541e78f"
+    },
+    {
+      "versions": ["v1.2.1"],
+      "systemSha256": "d80c6606e673667585a71f4ae03d7f153e420be8e120a9ea7fb37ac2db817fc3"
+    },
+    {
+      "versions": ["v1.3.0"],
+      "systemSha256": "5d6841e78c43ff5cf25ee51efc9e8c86b8a2e0d9ce9cf3440d36fe7df9b79e22"
+    },
+    {
+      "versions": ["v1.3.1"],
+      "systemSha256": "7d1f15fd46da32e9114d0b5126729c2e741d0601931023d2fdaa885947ea777b"
+    }
+  ]
+}

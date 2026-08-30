@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 project(mz2500_web_emulator LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)

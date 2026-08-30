@@ -11,6 +11,9 @@ complaint:
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import json
 import pathlib
 import subprocess
 import sys
@@ -22,7 +25,8 @@ ROM_DIR_CANDIDATES = [REPO / "roms" / "mz2500", REPO.parent.parent.parent / "rom
 
 EXPECTED = {
     "index.html", "style.css", "emulator.js", "audio-worklet.js",
-    "mz2500w.js", "mz2500w.wasm", "neko_can_run_demo.d88", "cpm.hdd.gz",
+    "cpm-system.js", "cpm-system.json", "mz2500w.js", "mz2500w.wasm",
+    "neko_can_run_demo.d88", "cpm.hdd.gz",
 }
 
 
@@ -43,6 +47,8 @@ def main() -> None:
     if missing:
         fail(f"missing files in dist: {sorted(missing)}")
     print(f"file set OK ({len(names)} files)")
+
+    subprocess.run(["node", str(HERE / "web" / "cpm-system.test.cjs")], check=True)
 
     rom_dir = next((d for d in ROM_DIR_CANDIDATES if d.is_dir()), None)
     if rom_dir is None:
@@ -80,14 +86,30 @@ def main() -> None:
     else:
         print("d88 provenance SKIPPED (game sources not present; standalone checkout)")
 
-    cpm_hdd = REPO / "os/cpm/build/cpm.hdd"
-    if cpm_hdd.is_file():
-        import gzip
-        if gzip.decompress((DIST / "cpm.hdd.gz").read_bytes()) != cpm_hdd.read_bytes():
-            fail("dist cpm.hdd.gz does not match os/cpm/build/cpm.hdd")
-        print("cpm.hdd provenance OK (matches the os/cpm build)")
-    else:
-        print("cpm.hdd provenance SKIPPED (os/cpm build not present; standalone checkout)")
+    cpm_candidates = [
+        REPO / "os/cpm/build/cpm.hdd",
+        REPO / "cpm-mz2500/build/cpm.hdd",
+    ]
+    cpm_hdd = next((path for path in cpm_candidates if path.is_file()), None)
+    if cpm_hdd is None:
+        fail("CP/M source HDD not found in a supported checkout layout")
+    bundled = gzip.decompress((DIST / "cpm.hdd.gz").read_bytes())
+    if bundled != cpm_hdd.read_bytes():
+        fail(f"dist cpm.hdd.gz does not match {cpm_hdd}")
+
+    manifest = json.loads((DIST / "cpm-system.json").read_text())
+    offset = manifest["systemOffset"]
+    end = offset + manifest["systemLength"]
+    if manifest["hddSize"] != len(bundled):
+        fail("CP/M manifest HDD size mismatch")
+    if manifest["hddSha256"] != hashlib.sha256(bundled).hexdigest():
+        fail("CP/M manifest HDD hash mismatch")
+    if manifest["systemSha256"] != hashlib.sha256(bundled[offset:end]).hexdigest():
+        fail("CP/M manifest system hash mismatch")
+    banner = f"EMM/SASI port {manifest['version']}".encode()
+    if banner not in bundled:
+        fail("CP/M manifest version does not match the boot banner")
+    print(f"cpm.hdd provenance OK ({manifest['version']}, matches {cpm_hdd})")
 
     print("AUDIT PASSED")
 

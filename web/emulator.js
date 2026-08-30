@@ -2340,6 +2340,13 @@ async function fetchCpmHddImage() {
   return raw; // a proxy already removed the gzip layer
 }
 
+async function fetchCpmSystemManifest() {
+  const v = encodeURIComponent(window.BUILD_ID || "dev");
+  const resp = await fetch("cpm-system.json?v=" + v);
+  if (!resp.ok) throw new Error(`CP/M manifest fetch failed: ${resp.status}`);
+  return resp.json();
+}
+
 function launchCpmHdd() {
   if (cpmHddPromise) return cpmHddPromise;
   cpmHddBtn.disabled = true;
@@ -2389,23 +2396,32 @@ function launchCpmHdd() {
       };
       sasiTargetEl.value = "0";
     } else {
-      // Returning user: the bundled system may be newer than the stored
-      // disk. Offer a PUTSYS-style refresh - the boot area (records
-      // 32-111) only, so every file on C:/D: survives untouched.
+      // A stored system is refreshed only when its hash is an allow-listed
+      // predecessor. Unknown or future revisions are preserved.
       try {
-        const bundled = await fetchCpmHddImage();
-        const lo = 32 * 256, hi = 112 * 256;
+        await flushSasiPersist();
+        const [bundled, manifest] = await Promise.all([
+          fetchCpmHddImage(), fetchCpmSystemManifest(),
+        ]);
+        const lo = CpmSystem.SYSTEM_OFFSET;
+        const hi = lo + CpmSystem.SYSTEM_LENGTH;
         const stored = sasiMedia.bytes;
         if (stored.length === bundled.length) {
-          let same = true;
-          for (let i = lo; same && i < hi; i++) same = stored[i] === bundled[i];
-          if (!same && window.confirm(
-              "CP/Mシステムの新しい版があります。ハードディスクのシステム領域" +
-              "だけ更新しますか？\n（保存されているファイルはそのまま残ります）")) {
+          const bundledHash = await CpmSystem.sha256Hex(bundled.subarray(lo, hi));
+          CpmSystem.validateManifest(manifest, bundled.length, bundledHash);
+          const storedHash = await CpmSystem.sha256Hex(stored.subarray(lo, hi));
+          const upgradeSource = CpmSystem.findUpgradeSource(manifest, storedHash);
+          if (storedHash !== bundledHash && upgradeSource && window.confirm(
+              `CP/M system ${manifest.version} is available.\n` +
+              "Update only the system area?\n(Your files will be preserved.)")) {
             stored.set(bundled.subarray(lo, hi), lo);
+          } else if (storedHash !== bundledHash && !upgradeSource) {
+            console.warn("Stored CP/M system is not a known predecessor; preserving it");
           }
         }
-      } catch (e) { /* offline: reusing the stored image as-is is fine */ }
+      } catch (e) {
+        console.warn("CP/M system refresh skipped", e);
+      }
     }
     sasiMedia.inserted = true;
     if (!mountSasiMedia()) {
